@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">{{ plan.name }}</h1>
+<div class="card"><div data-live-region="q"><div style="padding:16px 16px 0">
+
+{% call toolbar(page=page, total_pages=total_pages, total=total, export_url="/rate-plans/" ~ plan.id ~ "/export.csv", import_url="/rate-plans/" ~ plan.id ~ "/import") %}
+  <div class="fg" style="margin:0"><label class="fl">Search prefix</label><input name="q" value="{{ q }}" data-live-search data-page-param="page"></div>
+  {% if q %}<a href="/rate-plans/{{ plan.id }}" class="btn btn-sm">Clear</a>{% endif %}
+{% endcall %}
+
+<form method="POST" action="/rate-plans/{{ plan.id }}/entries/new" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;padding-bottom:12px;border-bottom:1px dashed #ddd">
+  <div class="fg" style="margin:0"><label class="fl">Prefix</label><input name="prefix" style="width:120px" required></div>
+  <div class="fg" style="margin:0"><label class="fl">Rate/min</label><input name="rate_per_min" type="number" step="0.00001" style="width:100px" required></div>
+  <div class="fg" style="margin:0"><label class="fl">Connect fee</label><input name="connect_fee" type="number" step="0.00001" style="width:100px"></div>
+  <div class="fg" style="margin:0"><label class="fl">Billing incr</label><input name="billing_incr" type="number" value="60" style="width:80px"></div>
+  <button type="submit" class="btn btn-sm">Add entry</button>
+</form>
+
+</div>
+<table><thead><tr><th>Prefix</th><th>Rate/min</th><th>Connect fee</th><th>Billing incr (s)</th></tr></thead>
+<tbody>{% for e in entries %}<tr><td class="mono">{{ e.prefix }}</td><td>{{ e.rate_per_min }}</td>
+  <td>{{ e.connect_fee }}</td><td>{{ e.billing_incr }}</td></tr>{% endfor %}</tbody></table>
+{% if not entries %}<div class="empty">No rate entries match.</div>{% endif %}
+</div>
+</div>
+{% endblock %}

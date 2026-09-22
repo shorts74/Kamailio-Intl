@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+{% include "_node_tabs.html" %}
+{% include "_pending_banner.html" %}
+
+<div data-live-region="q">
+{% call toolbar(page=page, total_pages=total_pages, total=total) %}
+  <div class="fg" style="margin:0"><label class="fl">Search name</label><input name="q" value="{{ q }}" placeholder="pipe name..." data-live-search data-page-param="page"></div>
+{% endcall %}
+
+<div class="card"><div class="card-head"><span class="card-title">Rate Limit Pipes</span></div>
+<div style="padding:12px 16px 0;font-size:12px;color:var(--muted,#888)">
+  pipelimit module -- database-backed, dynamically-created pipes. Global scope (algorithm FEEDBACK) is for system-wide overload protection;
+  trunk/domain/user scope is for granular per-entity shaping. Changes take effect on the next sync -- no restart needed.
+</div>
+
+<form method="POST" action="/nodes/{{ node.id }}/rate-limit-pipes/new" style="display:flex;gap:6px;align-items:end;flex-wrap:wrap;padding:12px 16px;border-bottom:1px dashed #ddd">
+  <div class="fg" style="margin:0"><label class="fl">Name</label><input name="name" style="width:120px" required></div>
+  <div class="fg" style="margin:0"><label class="fl">Scope</label><select name="scope_type" onchange="
+    document.getElementById('sc_trunk').style.display = this.value=='trunk' ? 'block' : 'none';
+    document.getElementById('sc_domain').style.display = this.value=='domain' ? 'block' : 'none';
+    document.getElementById('sc_user').style.display = this.value=='user' ? 'block' : 'none';
+  ">
+    <option value="global">Global (system-wide)</option>
+    <option value="trunk">Trunk</option>
+    <option value="domain">Domain</option>
+    <option value="user">User</option>
+  </select></div>
+  <div class="fg" style="margin:0;display:none" id="sc_trunk"><label class="fl">Trunk</label><select name="trunk_id" data-searchable data-placeholder="Search trunks...">
+    <option value="">--</option>{% for t in trunks %}<option value="{{ t.id }}">{{ t.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg" style="margin:0;display:none" id="sc_domain"><label class="fl">Domain</label><select name="domain_id" data-searchable data-placeholder="Search domains...">
+    <option value="">--</option>{% for d in domains %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg" style="margin:0;display:none" id="sc_user"><label class="fl">User</label><select name="subscriber_id" data-searchable data-placeholder="Search users...">
+    <option value="">--</option>{% for s in subscribers %}<option value="{{ s.id }}">{{ s.username }}@{{ s.domain_name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg" style="margin:0"><label class="fl">Algorithm</label><select name="algorithm">
+    <option value="TAILDROP">TAILDROP -- hard cutoff at limit</option>
+    <option value="RED">RED -- spreads drops evenly</option>
+    <option value="NETWORK">NETWORK -- bandwidth-based</option>
+    <option value="FEEDBACK">FEEDBACK -- CPU/load-based (global scope only)</option>
+  </select></div>
+  <div class="fg" style="margin:0"><label class="fl">Limit</label><input name="limit_value" type="number" value="100" style="width:70px"></div>
+  <div class="fg" style="margin:0"><label class="fl">Description</label><input name="description" style="width:150px"></div>
+  <button type="submit" class="btn btn-sm btn-primary">Add pipe</button>
+</form>
+
+{% if pipes %}
+<table><thead><tr><th>Name</th><th>Scope</th><th>Algorithm</th><th>Limit</th><th>Enabled</th><th></th></tr></thead>
+<tbody>{% for p in pipes %}<tr>
+  <td><a href="/rate-limit-pipes/{{ p.id }}/edit"><b>{{ p.name }}</b></a>{% if p.description %}<div style="font-size:12px;color:var(--muted,#888)">{{ p.description }}</div>{% endif %}</td>
+  <td>
+    <span class="badge badge-info">{{ p.scope_type }}</span>
+    {% if p.scope_type == 'trunk' %} {{ p.trunk_name }}
+    {% elif p.scope_type == 'domain' %} {{ p.domain_name }}
+    {% elif p.scope_type == 'user' %} {{ p.subscriber_username }}@{{ p.subscriber_domain }}
+    {% endif %}
+  </td>
+  <td class="mono">{{ p.algorithm }}</td>
+  <td>{{ p.limit_value }}</td>
+  <td>{% if p.enabled %}<span class="badge badge-ok">Yes</span>{% else %}<span class="badge badge-bad">No</span>{% endif %}</td>
+  <td style="text-align:right">
+    <a href="/rate-limit-pipes/{{ p.id }}/edit" class="btn btn-sm"><i class="ti ti-edit"></i> Edit</a>
+    <form method="POST" action="/rate-limit-pipes/{{ p.id }}/edit" style="display:inline">
+      <input type="hidden" name="name" value="{{ p.name }}">
+      <input type="hidden" name="scope_type" value="{{ p.scope_type }}">
+      <input type="hidden" name="trunk_id" value="{{ p.trunk_id or '' }}">
+      <input type="hidden" name="domain_id" value="{{ p.domain_id or '' }}">
+      <input type="hidden" name="subscriber_id" value="{{ p.subscriber_id or '' }}">
+      <input type="hidden" name="algorithm" value="{{ p.algorithm }}">
+      <input type="hidden" name="limit_value" value="{{ p.limit_value }}">
+      <input type="hidden" name="enabled" value="{{ '' if p.enabled else 'enabled' }}">
+      <button type="submit" class="btn btn-sm">{{ 'Disable' if p.enabled else 'Enable' }}</button>
+    </form>
+    <a href="/rate-limit-pipes/{{ p.id }}/delete" class="btn btn-sm" onclick="return confirm('Delete this pipe?')">Delete</a>
+  </td>
+</tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty">No rate limit pipes on this node yet.</div>{% endif %}
+</div>
+</div>
+{% endblock %}

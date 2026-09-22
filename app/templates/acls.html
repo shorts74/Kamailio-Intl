@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 4px">Access Control Lists</h1>
+<p style="font-size:12px;color:#888780;margin:0 0 12px">Reusable named CIDR allowlists. Tag one or more to a domain to restrict which source IPs may register or call as that domain's users -- a domain with no ACLs tagged allows from anywhere.</p>
+
+<div data-live-region="q">
+{% call toolbar(page=page, total_pages=total_pages, total=total, add_url="/acls/new", add_label="Add Access Control List") %}
+  <div class="fg" style="margin:0"><label class="fl">Search</label><input name="q" value="{{ q }}" placeholder="ACL name..." data-live-search data-page-param="page"></div>
+  {% if q %}<a href="/acls" class="btn btn-sm">Clear</a>{% endif %}
+{% endcall %}
+
+<div class="card">
+  {% if acls %}
+  <table><thead><tr><th>Name</th><th>Description</th><th>CIDR entries</th></tr></thead>
+  <tbody>{% for a in acls %}<tr>
+    <td><a href="/acls/{{ a.id }}"><b>{{ a.name }}</b></a></td><td>{{ a.description or '' }}</td><td>{{ a.entry_count }}</td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No ACLs match. <a href="/acls/new">Add your first one</a>.</div>{% endif %}
+</div>
+</div>
+{% endblock %}

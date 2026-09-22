@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% from "_sync_pending_button.html" import sync_pending_group %}
+{% block content %}
+{% include "_node_tabs.html" %}
+{% include "_pending_banner.html" %}
+
+<div class="card"><div class="card-head"><span class="card-title">SIP Profiles</span>
+  {{ sync_pending_group(node.id, false, "/nodes/" ~ node.id ~ "/sip-profiles/new", "Add profile") }}</div>
+<div data-live-region="q">
+<div style="padding:12px 16px 0">
+{% call toolbar(page=page, total_pages=total_pages, total=total) %}
+  <div class="fg" style="margin:0"><label class="fl">Search</label><input name="q" value="{{ request.args.get('q', '') }}" placeholder="profile name..." data-live-search data-page-param="page"></div>
+{% endcall %}
+</div>
+{% if profiles %}
+<table><thead><tr><th>Name</th><th>IP</th><th>Port</th><th>Transports (trunks using)</th><th>Workers</th><th>Domains</th><th>Trunks</th><th></th></tr></thead>
+<tbody>{% for p in profiles %}<tr>
+  <td><a href="/sip-profiles/{{ p.id }}"><b>{{ p.name }}</b></a>{% if p.is_default %} <span class="badge badge-info">default</span>{% endif %}</td>
+  <td class="mono">{{ p.ip_addr }}</td>
+  <td class="mono">{{ p.port }}</td>
+  <td>{% for l in p.listeners %}<span class="badge badge-ok" style="margin-right:4px">{{ l.transport|upper }} ({{ l.trunk_count }})</span>{% endfor %}</td>
+  <td>{{ p.workers_default }}</td>
+  <td>{{ p.domain_count }}</td>
+  <td>{{ p.trunk_count }}</td>
+  <td><a href="/sip-profiles/{{ p.id }}" class="btn btn-sm">Manage</a></td>
+</tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty">No SIP Profiles yet.</div>{% endif %}
+</div>
+</div>
+{% endblock %}

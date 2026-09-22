@@ -1,0 +1,292 @@
+{% extends "base.html" %}
+{% block content %}
+<div style="margin-bottom:12px"><a href="/domains/{{ subscriber.domain_id }}" class="btn btn-sm"><i class="ti ti-arrow-left"></i> Back to Users</a></div>
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">{{ subscriber.friendly_name or subscriber.username }}
+  <span style="font-size:13px;color:#888780;font-weight:400"> -- {{ subscriber.username }}@{{ subscriber.domain_name }}</span>
+  {% if subscriber.enabled %}<span class="badge badge-ok">Enabled</span>{% else %}<span class="badge badge-bad">Disabled</span>{% endif %}</h1>
+
+<div class="card"><div class="card-head"><span class="card-title">Settings</span></div>
+<form method="POST" action="/subscribers/{{ subscriber.id }}/edit">
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Name {{ help_icon("Name", "Admin-set friendly label for this user, shown throughout the UI instead of the raw username. Optional -- defaults to the username if left blank.") }}</label>
+    <input name="friendly_name" placeholder="e.g. Jane Smith" value="{{ subscriber.friendly_name or '' }}"></div>
+  <div class="fg"><label class="fl">Username</label><input value="{{ subscriber.username }}" disabled title="Username can't be changed here"></div>
+  <div class="fg"><label class="fl">New password</label><input name="password" type="password" placeholder="leave blank to keep current"></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="enabled" style="width:auto" {{ 'checked' if subscriber.enabled }}><label class="fl" style="margin:0">Enabled</label></div>
+
+  <div class="fg"><label class="fl">Ring policy {{ help_icon("Ring policy", "\"All\": every registered device for this user rings simultaneously on an incoming call. \"Latest\": only the most recently registered device rings.") }}</label><select name="ring_policy">
+    <option value="" {{ 'selected' if not subscriber.ring_policy }}>Domain default ({{ subscriber.domain_ring_policy }})</option>
+    <option value="all" {{ 'selected' if subscriber.ring_policy=='all' }}>All</option>
+    <option value="latest" {{ 'selected' if subscriber.ring_policy=='latest' }}>Latest</option>
+  </select></div>
+  <div class="fg"><label class="fl">Requires auth for outbound calls {{ help_icon("Requires auth for outbound calls", "Whether an INVITE claiming to be from this specific user gets digest-challenged. Runs on top of, not instead of, the registration-source proof that always applies regardless of this setting (an INVITE has to match a real, current registration for this user either way) -- this only controls whether credentials are ALSO required.") }}</label><select name="outbound_auth_required">
+    <option value="" {{ 'selected' if subscriber.outbound_auth_required is none }}>Domain default ({{ 'required' if subscriber.domain_outbound_auth_required else 'not required' }})</option>
+    <option value="1" {{ 'selected' if subscriber.outbound_auth_required == true }}>Required</option>
+    <option value="0" {{ 'selected' if subscriber.outbound_auth_required == false }}>Not required</option>
+  </select></div>
+  <div class="fg"><label class="fl">Max registrations {{ help_icon("Max registrations", "Caps how many devices this specific user can have registered at once, overriding the domain-wide default. Leave blank to use the domain default shown in the placeholder.") }}</label><input name="max_registrations" type="number" min="1" placeholder="domain default ({{ subscriber.domain_max_registrations }})" value="{{ subscriber.max_registrations or '' }}"></div>
+  <div class="fg"><label class="fl">Routing override {{ help_icon("Routing override", "Which routing plan this user's own outbound calls use, regardless of what the domain/SIP Profile would otherwise resolve to. Leave as None to use the normal resolution chain.") }}</label>
+    <select name="routing_profile_id" data-searchable data-placeholder="Search routing plans...">
+      <option value="">No override</option>
+      {% for rp in all_routing_profiles %}<option value="{{ rp.id }}" {{ 'selected' if subscriber.routing_profile_id==rp.id }}>{{ rp.label }}</option>{% endfor %}
+    </select></div>
+
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px" title="Applies across every node this domain is currently active on">
+    <input type="checkbox" name="rl_enabled" style="width:auto" {{ 'checked' if subscriber.rl_limit_value }}><label class="fl" style="margin:0">Rate limit this user {{ help_icon("Rate limit this user", "Caps this specific user's own call rate, independent of any domain-wide or trunk-wide rate limiting elsewhere in the platform. Applies across every node this domain is currently active on.") }}</label></div>
+  <div class="fg"><label class="fl">Calls/interval {{ help_icon("Calls/interval", "How many calls this user may place per rate-limit interval before further attempts are rejected. Only takes effect when \"Rate limit this user\" above is checked.") }}</label><input name="rl_limit" type="number" min="1" value="{{ subscriber.rl_limit_value or 3 }}"></div>
+
+  <div class="fg"><label class="fl">Diversion header on forwarded calls {{ help_icon("Diversion header", "Whether a Diversion header (RFC 5806) is added when a call to THIS user gets forwarded (busy/no-answer/unavailable/unconditional). Domain default: use whatever this domain's own setting is. Enabled/Disabled: override it for this user specifically.") }}</label><select name="diversion_header_enabled">
+    <option value="" {{ 'selected' if subscriber.diversion_header_enabled is none }}>Domain default</option>
+    <option value="1" {{ 'selected' if subscriber.diversion_header_enabled == true }}>Enabled</option>
+    <option value="0" {{ 'selected' if subscriber.diversion_header_enabled == false }}>Disabled</option>
+  </select></div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Caller ID Settings &mdash; Inbound</span></div>
+<div style="padding:16px 16px 0;font-size:11px;color:#888780">
+  This user's own requirement for calls <b>originating from</b> them -- decides which number is actually used as their caller ID. Every field here is optional -- leave as "Domain default" to inherit this user's domain settings ({{ subscriber.domain_name }}). Set a field here only when this specific user genuinely needs different behavior than the rest of the domain.
+</div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div style="grid-column:1/-1;font-size:11px;font-weight:600;color:#5f5e5a;text-transform:uppercase;letter-spacing:.03em;margin-top:4px">Caller</div>
+  <div class="fg"><label class="fl">Caller ID mode {{ help_icon("Caller ID mode", "What THIS user is allowed to present as caller ID, overriding the domain default. \"Allow any\": passes through unmodified. \"Allow DIDs only\": must be one of the user's own assigned DIDs or it's rewritten to their default. \"Force custom\": always rewritten to the Custom number field. \"Force specific number\": always rewritten to the Forced number field. \"Force per number\": for a user with multiple DIDs, each is enforced to map to itself.") }}</label><select name="inbound_callerid_mode">
+    <option value="" {{ 'selected' if not subscriber.inbound_callerid_mode }}>Domain default</option>
+    <option value="allow_any" {{ 'selected' if subscriber.inbound_callerid_mode=='allow_any' }}>Allow any</option>
+    <option value="allow_dids_only" {{ 'selected' if subscriber.inbound_callerid_mode=='allow_dids_only' }}>Allow DIDs only</option>
+    <option value="force_custom" {{ 'selected' if subscriber.inbound_callerid_mode=='force_custom' }}>Force custom number</option>
+    <option value="force_specific_number" {{ 'selected' if subscriber.inbound_callerid_mode=='force_specific_number' }}>Force specific number</option>
+    <option value="force_per_number" {{ 'selected' if subscriber.inbound_callerid_mode=='force_per_number' }}>Force per number</option>
+  </select></div>
+  <div class="fg"><label class="fl">Caller ID name {{ help_icon("Caller ID name", "Display name shown for this user specifically, e.g. \"Jane Smith\", overriding the domain default. Left blank means no display name is sent -- an empty string is never sent as a literal blank name.") }}</label><input name="inbound_callerid_name" value="{{ subscriber.inbound_callerid_name or '' }}" placeholder="Domain default"></div>
+  <div class="fg"><label class="fl">Custom number {{ help_icon("Custom number", "Used only when Caller ID mode above is \"Force custom number\".") }}</label><input name="inbound_callerid_custom_number" value="{{ subscriber.inbound_callerid_custom_number or '' }}" placeholder="Used if mode = Force custom"></div>
+  <div class="fg"><label class="fl">Forced number {{ help_icon("Forced number", "Used only when Caller ID mode above is \"Force specific number\".") }}</label><input name="inbound_callerid_forced_number" value="{{ subscriber.inbound_callerid_forced_number or '' }}" placeholder="Used if mode = Force specific"></div>
+  <div class="fg"><label class="fl">Prefer PAI/RPID {{ help_icon("Prefer PAI/RPID", "When reading a call's identity for this user, prefer a P-Asserted-Identity or Remote-Party-ID header over the plain From header, if present -- overriding the domain default.") }}</label><select name="inbound_use_pai_rpid_incoming">
+    <option value="" {{ 'selected' if subscriber.inbound_use_pai_rpid_incoming is none }}>Domain default</option>
+    <option value="1" {{ 'selected' if subscriber.inbound_use_pai_rpid_incoming == true }}>Enabled</option>
+    <option value="0" {{ 'selected' if subscriber.inbound_use_pai_rpid_incoming == false }}>Disabled</option>
+  </select></div>
+  <div style="grid-column:1/-1;font-size:11px;font-weight:600;color:#5f5e5a;text-transform:uppercase;letter-spacing:.03em;margin-top:8px;border-top:0.5px solid #e8e7e1;padding-top:12px">Called</div>
+  <div class="fg"><label class="fl">Called number source {{ help_icon("Called number source", "Which part of an incoming call to this user actually carries the dialed number, overriding the domain default. \"Request-URI\" (default, standard). \"To header\"/\"RPID\": rare, only if this specific user's device requires it.") }}</label><select name="inbound_called_number_source">
+    <option value="" {{ 'selected' if not subscriber.inbound_called_number_source }}>Domain default</option>
+    <option value="request_uri" {{ 'selected' if subscriber.inbound_called_number_source=='request_uri' }}>Request-URI</option>
+    <option value="to_header" {{ 'selected' if subscriber.inbound_called_number_source=='to_header' }}>To header</option>
+    <option value="rpid" {{ 'selected' if subscriber.inbound_called_number_source=='rpid' }}>Remote-Party-ID</option>
+  </select></div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Caller ID Settings &mdash; Outbound</span></div>
+<div style="padding:16px 16px 0;font-size:11px;color:#888780">
+  This user's own requirement for calls <b>routed TO</b> them (e.g. an inbound call to their DID) -- controls presentation and can further enforce the number, applied after routing and able to override whatever the originating side already decided. Overrides the domain default.
+</div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div style="grid-column:1/-1;font-size:11px;font-weight:600;color:#5f5e5a;text-transform:uppercase;letter-spacing:.03em;margin-top:4px">Caller</div>
+  <div class="fg"><label class="fl">Caller ID mode {{ help_icon("Caller ID mode (outbound)", "This user's own requirement for calls delivered TO them -- applied after routing, can override whatever the originating side already decided. Overrides the domain default.") }}</label><select name="outbound_callerid_mode">
+    <option value="" {{ 'selected' if not subscriber.outbound_callerid_mode }}>Domain default</option>
+    <option value="allow_any" {{ 'selected' if subscriber.outbound_callerid_mode=='allow_any' }}>Allow any</option>
+    <option value="allow_dids_only" {{ 'selected' if subscriber.outbound_callerid_mode=='allow_dids_only' }}>Allow DIDs only</option>
+    <option value="force_custom" {{ 'selected' if subscriber.outbound_callerid_mode=='force_custom' }}>Force custom number</option>
+    <option value="force_specific_number" {{ 'selected' if subscriber.outbound_callerid_mode=='force_specific_number' }}>Force specific number</option>
+    <option value="force_per_number" {{ 'selected' if subscriber.outbound_callerid_mode=='force_per_number' }}>Force per number</option>
+  </select></div>
+  <div class="fg"><label class="fl">Custom number {{ help_icon("Custom number (outbound)", "Used only when Caller ID mode above is \"Force custom number\".") }}</label><input name="outbound_callerid_custom_number" value="{{ subscriber.outbound_callerid_custom_number or '' }}" placeholder="Used if mode = Force custom"></div>
+  <div class="fg"><label class="fl">Forced number {{ help_icon("Forced number (outbound)", "Used only when Caller ID mode above is \"Force specific number\".") }}</label><input name="outbound_callerid_forced_number" value="{{ subscriber.outbound_callerid_forced_number or '' }}" placeholder="Used if mode = Force specific"></div>
+  <div class="fg"><label class="fl">Presentation method {{ help_icon("Presentation method", "How the final caller ID is written when delivered to this user, overriding the domain default. \"From header\" (default, standard). \"P-Asserted-Identity\"/\"Remote-Party-ID\": for softphones that specifically read those instead.") }}</label><select name="outbound_callerid_method">
+    <option value="" {{ 'selected' if not subscriber.outbound_callerid_method }}>Domain default</option>
+    <option value="from_header" {{ 'selected' if subscriber.outbound_callerid_method=='from_header' }}>From header</option>
+    <option value="pai" {{ 'selected' if subscriber.outbound_callerid_method=='pai' }}>P-Asserted-Identity</option>
+    <option value="rpid" {{ 'selected' if subscriber.outbound_callerid_method=='rpid' }}>Remote-Party-ID</option>
+  </select></div>
+  <div class="fg"><label class="fl">Number URI format {{ help_icon("Number URI format", "How a phone-number-shaped identifier is formatted for this user, overriding the domain default. \"SIP URI\" (default). \"SIP URI with user=phone\": some softphones expect this to recognize a real telephone number. \"tel: URI\": rare, only if this specific device requires it. Applies to the caller-ID identity -- independent of any R-URI-related settings, which apply to the R-URI itself.") }}</label><select name="outbound_number_uri_format">
+    <option value="" {{ 'selected' if not subscriber.outbound_number_uri_format }}>Domain default</option>
+    <option value="sip_uri" {{ 'selected' if subscriber.outbound_number_uri_format=='sip_uri' }}>SIP URI</option>
+    <option value="sip_uri_user_phone" {{ 'selected' if subscriber.outbound_number_uri_format=='sip_uri_user_phone' }}>SIP URI with user=phone</option>
+    <option value="tel_uri" {{ 'selected' if subscriber.outbound_number_uri_format=='tel_uri' }}>tel: URI</option>
+  </select></div>
+  <div class="fg"><label class="fl">Use local address in From {{ help_icon("Use local address in From", "Replace the domain part of the outgoing From header with this node's own local/advertised address, overriding the domain default.") }}</label><select name="outbound_use_local_address_from">
+    <option value="" {{ 'selected' if subscriber.outbound_use_local_address_from is none }}>Domain default</option>
+    <option value="1" {{ 'selected' if subscriber.outbound_use_local_address_from == true }}>Enabled</option>
+    <option value="0" {{ 'selected' if subscriber.outbound_use_local_address_from == false }}>Disabled</option>
+  </select></div>
+  <div style="grid-column:1/-1;font-size:11px;font-weight:600;color:#5f5e5a;text-transform:uppercase;letter-spacing:.03em;margin-top:8px;border-top:0.5px solid #e8e7e1;padding-top:12px">Called</div>
+  <div class="fg"><label class="fl">Called number placement {{ help_icon("Called number placement", "Where the dialed number is written when delivered to this user, overriding the domain default. \"Request-URI\" (default, standard).") }}</label><select name="outbound_called_number_placement">
+    <option value="" {{ 'selected' if not subscriber.outbound_called_number_placement }}>Domain default</option>
+    <option value="request_uri" {{ 'selected' if subscriber.outbound_called_number_placement=='request_uri' }}>Request-URI</option>
+    <option value="to_header" {{ 'selected' if subscriber.outbound_called_number_placement=='to_header' }}>To header</option>
+    <option value="rpid" {{ 'selected' if subscriber.outbound_called_number_placement=='rpid' }}>Remote-Party-ID</option>
+  </select></div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Privacy</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Privacy mode {{ help_icon("Privacy mode", "Final layer, can override the presentation method above when they'd conflict. Overrides the domain default. \"None\" (default). \"Privacy: id\": From anonymized, but real identity still travels in P-Asserted-Identity for a trusted next hop. \"Full\": From anonymized, PAI suppressed entirely -- no real identity leaves the platform at all.") }}</label><select name="outbound_privacy_mode">
+    <option value="" {{ 'selected' if not subscriber.outbound_privacy_mode }}>Domain default</option>
+    <option value="none" {{ 'selected' if subscriber.outbound_privacy_mode=='none' }}>None</option>
+    <option value="id" {{ 'selected' if subscriber.outbound_privacy_mode=='id' }}>Privacy: id</option>
+    <option value="full" {{ 'selected' if subscriber.outbound_privacy_mode=='full' }}>Full</option>
+  </select></div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Topology Hiding</span></div>
+<div style="padding:16px 16px 0;font-size:11px;color:#888780">
+  Whether Kamailio masks its own internal network addresses in traffic to/from this user specifically. Leaving either as "Domain default" follows this user's domain setting ({{ subscriber.domain_name }}).
+</div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Inbound (traffic from this user) {{ help_icon("Topology hiding, inbound", "Whether our topology is masked in traffic relayed onward that originated from this user specifically, overriding the domain default.") }}</label><select name="topoh_mask_inbound">
+    <option value="" {{ 'selected' if subscriber.topoh_mask_inbound is none }}>Domain default</option>
+    <option value="1" {{ 'selected' if subscriber.topoh_mask_inbound == true }}>Enabled</option>
+    <option value="0" {{ 'selected' if subscriber.topoh_mask_inbound == false }}>Disabled</option>
+  </select></div>
+  <div class="fg"><label class="fl">Outbound (traffic to this user) {{ help_icon("Topology hiding, outbound", "Whether our topology is masked in traffic being delivered to this user specifically, overriding the domain default.") }}</label><select name="topoh_mask_outbound">
+    <option value="" {{ 'selected' if subscriber.topoh_mask_outbound is none }}>Domain default</option>
+    <option value="1" {{ 'selected' if subscriber.topoh_mask_outbound == true }}>Enabled</option>
+    <option value="0" {{ 'selected' if subscriber.topoh_mask_outbound == false }}>Disabled</option>
+  </select></div>
+</div></div>
+
+<button type="submit" class="btn btn-sm btn-primary"><i class="ti ti-check"></i> Save settings</button>
+</form>
+
+<div class="card"><div class="card-head"><span class="card-title">Access control (additional trusted source IPs)</span></div>
+<div style="padding:0 16px;font-size:11px;color:#888780;padding-top:12px">Identity for this user always comes from registration/credential validation, never from an ACL -- attaching one here only adds a source-IP restriction on top of that. Only Allow entries apply -- Deny entries in an attached ACL have no effect here. Multiple ACLs can be attached -- all of them are checked (an allow in any one is enough). Zero attached = accepted from anywhere, same as today's default behavior. <a href="/acls/new">Manage Access Control Lists</a>.</div>
+{% set attached_acls = acls|selectattr('id', 'in', tagged_acl_ids)|list %}
+{% if attached_acls %}
+<table><thead><tr><th>Access Control List</th><th></th></tr></thead>
+<tbody>{% for a in attached_acls %}<tr>
+  <td>{{ a.name }}</td>
+  <td><form method="POST" action="/subscribers/{{ subscriber.id }}/acls/{{ a.id }}/delete" style="display:inline"><button type="submit" class="btn btn-sm">Remove</button></form></td>
+</tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty">No Access Control Lists attached.</div>{% endif %}
+{% set unattached_acls = acls|rejectattr('id', 'in', tagged_acl_ids)|list %}
+{% if unattached_acls %}
+<div style="padding:16px;border-top:0.5px solid #e8e7e1">
+  <form method="POST" action="/subscribers/{{ subscriber.id }}/acls/add" style="display:flex;gap:8px;align-items:end">
+    <div class="fg" style="margin:0"><label class="fl">Attach an Access Control List</label>
+      <select name="acl_id"><option value="">Select one...</option>{% for a in unattached_acls %}<option value="{{ a.id }}">{{ a.name }}</option>{% endfor %}</select>
+    </div>
+    <button type="submit" class="btn btn-sm btn-primary">Add</button>
+  </form>
+</div>
+{% endif %}
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Trust CIDRs (source-IP trust only -- not identity)</span></div>
+<div style="padding:16px">
+<div style="font-size:11px;color:#888780;margin-bottom:12px">Different from Access Control Lists above: those are checked against, but identity for this user always comes from registration/credential validation. These two fields are pure <em>trust</em> -- a coarser "is this source even allowed to be considered at all" gate, for when the admin wants a much broader subnet trusted than an ACL should ever use. Leave at 0.0.0.0/0 (trust from anywhere) to match today's default, unrestricted behavior.</div>
+<form method="POST" action="/subscribers/{{ subscriber.id }}/trust-cidrs" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+  <div class="fg" style="margin:0"><label class="fl">Trust CIDR 1</label><input name="inbound_trust_cidr_1" value="{{ subscriber.inbound_trust_cidr_1 or '0.0.0.0/0' }}" placeholder="0.0.0.0/0"></div>
+  <div class="fg" style="margin:0"><label class="fl">Trust CIDR 2</label><input name="inbound_trust_cidr_2" value="{{ subscriber.inbound_trust_cidr_2 or '0.0.0.0/0' }}" placeholder="0.0.0.0/0"></div>
+  <button type="submit" class="btn btn-sm btn-primary">Save</button>
+</form>
+</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title"><i class="ti ti-stethoscope"></i> Registration Diagnostic</span></div>
+<div style="padding:16px">
+  <p style="font-size:11px;color:#888780;margin:0 0 10px">Runs the same sequence used to debug a real registration failure: subscriber account status, credentials, whether this domain is actually bound to a SIP Profile on the node you pick, live registration state (straight from Kamailio), and recent log mentions -- in that order, since that's the order that narrows down a real failure fastest.</p>
+  <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+    <div class="fg" style="margin:0"><label class="fl">Node to check</label>
+      <select id="diag-node-select" style="width:200px">
+        {% if not diagnostic_nodes %}<option value="">No nodes configured</option>{% endif %}
+        {% for n in diagnostic_nodes %}<option value="{{ n.id }}">{{ n.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <button type="button" class="btn btn-sm btn-primary" onclick="runRegisterDiagnostic()" {{ 'disabled' if not diagnostic_nodes }}>Run diagnostic</button>
+  </div>
+  <div id="diag-results" style="margin-top:14px;display:none"></div>
+</div></div>
+
+<script>
+function runRegisterDiagnostic() {
+  const nodeId = document.getElementById('diag-node-select').value;
+  if (!nodeId) return;
+  const resultsEl = document.getElementById('diag-results');
+  resultsEl.style.display = 'block';
+  resultsEl.innerHTML = '<div style="font-size:12px;color:#888780">Running...</div>';
+
+  const fd = new FormData();
+  fd.append('node_id', nodeId);
+  fetch('/subscribers/{{ subscriber.id }}/register-diagnostic', {method: 'POST', headers: {'Accept': 'application/json'}, body: fd})
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) { resultsEl.innerHTML = '<div style="color:#a32d2d;font-size:12px">' + data.error + '</div>'; return; }
+      const statusBadge = s => s === 'ok' ? '<span class="badge badge-ok">OK</span>' :
+                                 s === 'fail' ? '<span class="badge badge-bad">Issue</span>' :
+                                 '<span class="badge badge-info">Info</span>';
+      let html = '<table><thead><tr><th>Check</th><th>Status</th><th>Detail</th></tr></thead><tbody>';
+      data.checks.forEach((c, i) => {
+        html += `<tr><td>${c.label}</td><td>${statusBadge(c.status)}</td><td style="font-size:12px">${c.detail}`;
+        if (c.raw) {
+          html += ` <a href="#" onclick="event.preventDefault(); const el = document.getElementById('diag-raw-${i}'); el.style.display = el.style.display === 'none' ? 'block' : 'none';" style="font-size:11px">show output</a>`;
+          html += `<pre id="diag-raw-${i}" style="display:none;margin-top:6px;padding:10px;background:#1e1e1e;color:#d4d4d4;font-size:11px;white-space:pre-wrap;word-break:break-all;border-radius:6px;max-height:300px;overflow-y:auto">${(c.raw || '(empty)').replace(/</g, '&lt;')}</pre>`;
+        }
+        html += '</td></tr>';
+      });
+      html += '</tbody></table>';
+      resultsEl.innerHTML = html;
+    })
+    .catch(() => { resultsEl.innerHTML = '<div style="color:#a32d2d;font-size:12px">Request failed.</div>'; });
+}
+</script>
+
+<div class="card"><div class="card-head">
+  <span class="card-title">Numbers</span>
+  <form method="POST" action="/subscribers/{{ subscriber.id }}/numbers/import" enctype="multipart/form-data" style="display:inline;margin:0">
+    <label class="btn btn-sm" style="cursor:pointer;margin:0">
+      <i class="ti ti-upload"></i> Import CSV
+      <input type="file" name="csv_file" accept=".csv" style="display:none" onchange="this.form.submit()">
+    </label>
+  </form>
+</div>
+<div style="padding:0 16px;font-size:11px;color:#888780;padding-top:12px">Feeds the Subscriber Lookup routing engine -- a call to any number listed here resolves to this subscriber. One subscriber can have any number of numbers. CSV format: <code>number</code> column required, optional <code>type</code> column (ext/did/alias/sms/wa/cust/cell, defaults to did).</div>
+{% if numbers %}
+<table><thead><tr><th>Number</th><th>Type</th><th>Source</th><th>Added</th><th></th></tr></thead>
+<tbody>{% for n in numbers %}<tr>
+  <td class="mono">{{ n.number }}</td>
+  <td><span class="badge">{{ n.number_type }}</span></td>
+  <td><span class="badge badge-info">{{ n.source }}</span></td>
+  <td style="font-size:11px;color:#888780">{{ n.created_at }}</td>
+  <td><form method="POST" action="/subscribers/{{ subscriber.id }}/numbers/{{ n.number }}/delete" style="display:inline" onsubmit="return confirm('Remove this number?')"><button type="submit" class="btn btn-sm">Remove</button></form></td>
+</tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty">No numbers added yet.</div>{% endif %}
+<div style="padding:16px;border-top:0.5px solid #e8e7e1">
+  <form method="POST" action="/subscribers/{{ subscriber.id }}/numbers/add" style="display:flex;gap:8px;align-items:end">
+    <div class="fg" style="margin:0"><label class="fl">Add a number</label><input name="number" placeholder="61412345678" required></div>
+    <div class="fg" style="margin:0"><label class="fl">Type</label><select name="number_type">
+      <option value="did">DID</option><option value="ext">Extension</option><option value="alias">Alias</option>
+      <option value="sms">SMS</option><option value="wa">WhatsApp</option><option value="cust">Custom</option><option value="cell">Cell</option>
+    </select></div>
+    <button type="submit" class="btn btn-sm btn-primary">Add</button>
+  </form>
+</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Call Forwarding</span></div>
+<div style="padding:0 16px;font-size:11px;color:#888780;padding-top:12px">Each type only takes effect if the matching domain-level switch is also on ({{ subscriber.domain_name }}'s settings) -- an admin must enable each type domain-wide before any subscriber under it can use it.</div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px">
+{% for ftype, flabel, fhelp in [
+  ('unconditional', 'Unconditional', 'Always forwards -- this subscriber\'s own phone never rings at all.'),
+  ('busy', 'Busy', 'Forwards when this subscriber is registered but declines/is busy (486/600).'),
+  ('no_answer', 'No answer', 'Forwards if nobody answers within the configured ring timeout.'),
+  ('unavailable', 'Unavailable', 'Forwards when this subscriber has zero active registrations at all.')
+] %}
+{% set fwd = forwarding_by_type.get(ftype) %}
+<div class="card" style="margin:0"><div style="padding:12px">
+  <b style="font-size:13px">{{ flabel }}</b>
+  <p style="font-size:11px;color:#888780;margin:4px 0 10px">{{ fhelp }}</p>
+  <form method="POST" action="/subscribers/{{ subscriber.id }}/forwarding/{{ ftype }}/save">
+    <label class="fl" style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><input type="checkbox" name="enabled" style="width:auto" {{ 'checked' if fwd and fwd.enabled }}> Enabled</label>
+    <div class="fg"><label class="fl">Forward to local subscriber</label><select name="target_subscriber_id" style="width:100%" data-searchable data-placeholder="Search users...">
+      <option value="">-- none --</option>
+      {% for su in same_domain_subscribers %}<option value="{{ su.id }}" {{ 'selected' if fwd and fwd.target_subscriber_id==su.id }}>{{ su.username }}</option>{% endfor %}
+    </select></div>
+    <div class="fg"><label class="fl">Or forward to external number</label><input name="target_external_number" value="{{ fwd.target_external_number if fwd and fwd.target_external_number else '' }}" placeholder="61400000000"></div>
+    <div class="fg"><label class="fl">Mode {{ help_icon("Mode", "Redirect: sends a 3xx back to the caller with the target as Contact -- the caller's own device/trunk decides whether to follow it, and not every trunk honors 3xx. Reroute: relays to the target directly, transparent to the caller, more reliable but keeps this node in the media/signaling path throughout.") }}</label><select name="mode">
+      <option value="reroute" {{ 'selected' if not fwd or fwd.mode=='reroute' }}>Reroute (transparent)</option>
+      <option value="redirect" {{ 'selected' if fwd and fwd.mode=='redirect' }}>Redirect (3xx)</option>
+    </select></div>
+    <button type="submit" class="btn btn-sm btn-primary">Save</button>
+  </form>
+</div></div>
+{% endfor %}
+</div>
+</div>
+{% endblock %}

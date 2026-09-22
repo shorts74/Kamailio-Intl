@@ -1,0 +1,17 @@
+{# Blocklist configuration fields -- shared between routing_profile_form.html
+   (create) and routing_profile_detail.html (edit). `profile` is None/undefined
+   on create, a real row with existing values on edit. #}
+<div class="fg" style="margin-bottom:14px"><label class="fl">Check order {{ help_icon("Check order", "Which number is checked first -- called or calling. If the first check rejects, the second blocklist is never even evaluated (short-circuits). If it diverts (substitutes the number), the check for the OTHER number still runs afterward.") }}</label><select name="check_order">
+  <option value="called_first" {{ 'selected' if profile and profile.check_order=='called_first' }}>Called number first</option>
+  <option value="calling_first" {{ 'selected' if profile and profile.check_order=='calling_first' }}>Calling number first</option>
+</select></div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+  <div class="fg"><label class="fl">Called-number blocklist {{ help_icon("Called-number blocklist", "Which reusable blocklist to check the dialed (called) number against. Leave blank to skip checking the called number entirely.") }}</label><select name="called_blocklist_id">
+    <option value="">None</option>{% for bl in blocklists %}<option value="{{ bl.id }}" {{ 'selected' if profile and profile.called_blocklist_id==bl.id }}>{{ bl.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">Calling-number blocklist {{ help_icon("Calling-number blocklist", "Which reusable blocklist to check the caller (calling) number against. Leave blank to skip checking the calling number entirely.") }}</label><select name="calling_blocklist_id">
+    <option value="">None</option>{% for bl in blocklists %}<option value="{{ bl.id }}" {{ 'selected' if profile and profile.calling_blocklist_id==bl.id }}>{{ bl.name }}</option>{% endfor %}
+  </select></div>
+</div>
+<div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px">Destination for calls that pass (no match, or a diverted match) -- reject is decided per-blocklist-entry, not here.</div>
+{% include "_destination_selector.html" with context %}

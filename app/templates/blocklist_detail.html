@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+<div style="margin-bottom:12px"><a href="/blocklists" class="btn btn-sm"><i class="ti ti-arrow-left"></i> Back to Blocklists</a></div>
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">{{ blocklist.name }}</h1>
+
+<div class="card"><div class="card-head"><span class="card-title">Used by</span></div>
+<div style="padding:16px">
+  {% if profiles_using %}
+  {% for p in profiles_using %}<span class="badge badge-info" style="margin-right:6px"><a href="/routing-profiles/{{ p.id }}" style="color:inherit">{{ p.node_name }} / {{ p.name }}</a></span>{% endfor %}
+  {% else %}<span style="font-size:12px;color:#888780">Not attached to any routing plan yet -- select it from a Blocklist-type plan's Blocklist configuration section.</span>{% endif %}
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Blocklist settings</span></div>
+<form method="POST" action="/blocklists/{{ blocklist.id }}/edit" style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Name</label><input name="name" value="{{ blocklist.name }}" required></div>
+  <div class="fg" style="grid-column:1/-1"><label class="fl">Description</label><input name="description" value="{{ blocklist.description or '' }}"></div>
+  <div class="fg"><label class="fl">Default action {{ help_icon("Default action", "What happens when a call matches an entry that doesn't have its own override -- reject the call outright, or divert it (substitute the number) and let it continue routing normally.") }}</label><select name="default_action">
+    <option value="reject" {{ 'selected' if blocklist.default_action=='reject' }}>Reject</option>
+    <option value="divert" {{ 'selected' if blocklist.default_action=='divert' }}>Divert</option>
+  </select></div>
+  <div class="fg"><label class="fl">Default reject code {{ help_icon("Default reject code", "The SIP response code sent for a matched entry when Default action is Reject and that entry has no code override of its own. 603 (Decline) is the conventional choice for a blocklist.") }}</label><input name="default_reject_code" value="{{ blocklist.default_reject_code }}" style="width:80px"></div>
+  <div class="fg"><label class="fl">Default reject reason {{ help_icon("Default reject reason", "The SIP response's reason phrase, sent alongside Default reject code.") }}</label><input name="default_reject_reason" value="{{ blocklist.default_reject_reason }}"></div>
+  <div class="fg"><label class="fl">Default divert number {{ help_icon("Default divert number", "Only used when Default action is Divert -- the number a blocked call is redirected to instead. Can be overridden per entry.") }}</label><input name="default_divert_number" value="{{ blocklist.default_divert_number or '' }}"></div>
+  <div style="grid-column:1/-1"><button type="submit" class="btn btn-sm btn-primary">Save blocklist settings</button></div>
+</form>
+</div>
+
+<div class="card"><div data-live-region="q"><div style="padding:16px 16px 0">
+
+{% call toolbar(page=page, total_pages=total_pages, total=total) %}
+  <div class="fg" style="margin:0"><label class="fl">Search number/prefix</label><input name="q" value="{{ q }}" data-live-search data-page-param="page"></div>
+  {% if q %}<a href="/blocklists/{{ blocklist.id }}" class="btn btn-sm">Clear</a>{% endif %}
+{% endcall %}
+
+<form method="POST" action="/blocklists/{{ blocklist.id }}/entries/new" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+  <div class="fg" style="margin:0"><label class="fl">Number / prefix {{ help_icon("Number / prefix", "The number (exact match) or leading digits (prefix match, e.g. a country/area code) to check calls against -- which one depends on Match type.") }}</label><input name="number_or_prefix" style="width:140px" placeholder="+19005551234" required></div>
+  <div class="fg" style="margin:0"><label class="fl">Match type {{ help_icon("Match type", "Exact: matches only that literal number. Prefix: matches any number starting with the given digits (e.g. block an entire country/area code at once).") }}</label><select name="match_type">
+    <option value="exact">Exact</option>
+    <option value="prefix">Prefix</option>
+  </select></div>
+  <div class="fg" style="margin:0"><label class="fl">Block on {{ help_icon("Block on", "Which side of the call this entry is checked against -- the dialed (called) number, the caller's (calling) number, or both.") }}</label><select name="block_on">
+    <option value="both">Called + calling</option>
+    <option value="called">Called only</option>
+    <option value="calling">Calling only</option>
+  </select></div>
+  <div class="fg" style="margin:0"><label class="fl">Description</label><input name="description" style="width:140px"></div>
+  <div class="fg" style="margin:0"><label class="fl">Action override {{ help_icon("Action override", "Leave blank to inherit the blocklist's own default action/code/reason/divert. Set here to override for this specific entry only.") }}</label><select name="action_override">
+    <option value="">Inherit default</option>
+    <option value="reject">Reject</option>
+    <option value="divert">Divert</option>
+  </select></div>
+  <div class="fg" style="margin:0"><label class="fl">Divert override {{ help_icon("Divert override", "Only used when Action override above is Divert -- the entry-specific divert number, overriding the blocklist's own Default divert number.") }}</label><input name="divert_number_override" style="width:110px" placeholder="only if diverting"></div>
+  <button type="submit" class="btn btn-sm">Add entry</button>
+</form>
+<p style="margin:4px 0 12px;font-size:11px;color:#888780;padding-bottom:12px;border-bottom:1px dashed #ddd">Prefix entries match any number starting with the given digits (e.g. a country/area code block) -- exact entries match only that literal number.</p>
+
+</div>
+<table><thead><tr><th>Number / prefix</th><th>Type</th><th>Block on</th><th>Description</th><th>Action</th><th></th></tr></thead>
+<tbody>{% for e in entries %}<tr>
+  <td class="mono">{{ e.number_or_prefix }}</td>
+  <td>{{ e.match_type }}</td>
+  <td>{{ e.block_on }}</td>
+  <td>{{ e.description or '' }}</td>
+  <td>{% if e.action_override %}<span class="badge {{ 'badge-bad' if e.action_override == 'reject' else 'badge-info' }}">{{ e.action_override }}{{ ' -> ' + e.divert_number_override if e.action_override == 'divert' and e.divert_number_override }}</span>{% else %}<span style="font-size:11px;color:#888780">inherits default</span>{% endif %}</td>
+  <td><a href="/blocklists/entries/{{ e.id }}/delete" class="btn btn-sm">Remove</a></td>
+</tr>{% endfor %}</tbody></table>
+{% if not entries %}<div class="empty">No entries match.</div>{% endif %}
+</div>
+</div>
+{% endblock %}

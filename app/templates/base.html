@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}{{ settings.company_name if settings else 'SIP Trunk Platform' }}{% endblock %}</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.31.0/dist/tabler-icons.min.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+:root{
+  --brand-primary: {{ settings.primary_color if settings else '#4a2f52' }};
+  --brand-primary-dark: {{ settings.primary_dark if settings else '#2e1c34' }};
+  --brand-primary-light: {{ settings.primary_light if settings else '#eeeaf0' }};
+  --brand-dark: {{ settings.accent_dark if settings else '#1a1a1a' }};
+}
+*{box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;background:#f8f8f7;color:#1a1a18;margin:0}
+a{color:var(--brand-primary-dark);text-decoration:none}
+.layout{display:flex;flex-direction:column;min-height:100vh}
+.topbar{background:#fff;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:0.5px solid #e8e7e1}
+.brand{display:flex;align-items:center;gap:8px}
+.brand-logo{width:24px;height:24px;border-radius:4px;background:var(--brand-primary);display:flex;align-items:center;justify-content:center}
+.brand-name{font-size:15px;font-weight:500;color:var(--brand-dark)}
+.body{display:flex;flex:1}
+.sidebar{width:180px;flex-shrink:0;background:#fff;padding:12px 0;border-right:0.5px solid #e8e7e1}
+.sidebar a{display:flex;align-items:center;gap:8px;padding:8px 16px;color:#5f5e5a;font-size:13px}
+.sidebar a:hover{background:#f8f8f7}
+.sidebar a.active{border-left:2px solid var(--brand-primary);background:var(--brand-primary-light);color:var(--brand-primary-dark);font-weight:500}
+.content{flex:1;min-width:0;background:#f8f8f7}
+.main{padding:20px 24px;flex:1;min-width:0;max-width:1800px;margin:0 auto}
+@media (max-width:1100px){
+  .sidebar{width:150px}
+  .main{padding:16px}
+}
+@media (max-width:800px){
+  .sidebar{width:60px}
+  .sidebar a span{display:none}
+  .sidebar a{justify-content:center;padding:10px 6px}
+  .main{padding:12px}
+  .metrics{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
+}
+.btn{padding:6px 16px;font-size:13px;border:0.5px solid var(--brand-dark);border-radius:20px;background:none;cursor:pointer;color:var(--brand-dark);display:inline-flex;align-items:center;gap:6px;text-decoration:none}
+.btn:hover{background:#f1efe8}
+.btn-primary{background:var(--brand-dark);color:#fff;border-color:var(--brand-dark)}
+.btn-primary:hover{opacity:.85;background:var(--brand-dark)}
+.btn-danger{color:#a32d2d;border-color:#f09595}
+.btn-sm{padding:4px 12px;font-size:12px}
+.card{background:#fff;border:0.5px solid #e8e7e1;border-radius:10px;overflow:hidden;margin-bottom:20px}
+.card table{overflow-x:auto;max-width:100%}
+.card-head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:0.5px solid #e8e7e1}
+.card-title{font-size:12px;font-weight:500;color:#5f5e5a;text-transform:uppercase;letter-spacing:.04em}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:#5f5e5a;font-weight:500;font-size:11px;padding:8px 14px;border-bottom:0.5px solid #e8e7e1;text-transform:uppercase;background:#faf9f7}
+td{padding:9px 14px;border-bottom:0.5px solid #f1efe8;vertical-align:middle}
+tr:hover td{background:#faf9f7}
+.mono{font-family:'SFMono-Regular',Consolas,monospace;font-size:12px}
+.badge{font-size:11px;padding:2px 8px;border-radius:4px;font-weight:500}
+.badge-ok{background:#eaf3de;color:#3b6d11}
+.badge-bad{background:#fcebeb;color:#a32d2d}
+.badge-info{background:#e6f1fb;color:#185fa5}
+.badge-warn{background:#faeeda;color:#854f0b}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:20px}
+.metric{background:#f1efe8;border-radius:8px;padding:12px 14px}
+.metric-label{font-size:11px;color:#5f5e5a;margin-bottom:4px}
+.metric-val{font-size:22px;font-weight:500;color:var(--brand-primary-dark)}
+.add-form{padding:14px 16px;background:#faf9f7;border-top:0.5px solid #e8e7e1;display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+.add-form button[type="submit"]{margin-left:auto}
+.fg{display:flex;flex-direction:column;gap:4px}
+.fl{font-size:11px;color:#5f5e5a;font-weight:500}
+input,select,textarea{font-family:inherit;font-size:13px;height:34px;padding:0 10px;border:0.5px solid #b4b2a9;border-radius:6px;background:#fff;color:#1a1a18;width:100%}
+.combo-wrap{position:relative}
+.combo-input{cursor:text}
+.combo-list{position:absolute;top:36px;left:0;right:0;z-index:50;background:#fff;border:0.5px solid #b4b2a9;border-radius:6px;max-height:220px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.1);display:none}
+.combo-list.open{display:block}
+.combo-opt{padding:7px 10px;font-size:13px;cursor:pointer}
+.combo-opt:hover,.combo-opt.active{background:#f1efe8}
+.combo-empty{padding:7px 10px;font-size:12px;color:#888780}
+.flash{padding:10px 24px;font-size:13px;display:flex;align-items:center;gap:8px}
+.flash-ok{background:#eaf3de;color:#3b6d11}
+.flash-err{background:#fcebeb;color:#a32d2d}
+.empty{padding:24px;text-align:center;color:#888780;font-size:13px}
+.pagination{display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:12px;color:#5f5e5a}
+.pagination .pages{display:flex;gap:4px}
+.help-icon-btn { display:inline-flex; align-items:center; justify-content:center; width:15px; height:15px; border-radius:50%; background:#e8e7e1; color:#5f5e5a; font-size:10px; font-weight:600; cursor:pointer; user-select:none; line-height:1; margin-left:4px; vertical-align:middle; }
+.help-icon-btn:hover { background:#d8d7d1; }
+#help-icon-overlay { display:none; position:fixed; inset:0; z-index:98; pointer-events:none; }
+#help-icon-overlay.help-icon-open { display:block; }
+#help-icon-panel { display:none; position:fixed; z-index:99; width:280px; background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; box-shadow:0 4px 16px rgba(0,0,0,0.15); font-size:12px; font-weight:400; line-height:1.5; color:#333; }
+#help-icon-panel.help-icon-open { display:block; }
+#help-icon-panel b { display:block; margin-bottom:6px; font-size:13px; padding-right:18px; }
+#help-icon-panel p { margin:0; }
+#help-icon-panel-close { position:absolute; top:8px; right:8px; width:18px; height:18px; display:flex; align-items:center; justify-content:center; border-radius:4px; cursor:pointer; color:#888780; font-size:14px; line-height:1; user-select:none; }
+#help-icon-panel-close:hover { background:#f0efe9; color:#333; }
+</style>
+{% block head %}{% endblock %}
+</head>
+<body>
+<div class="layout">
+  <div class="topbar">
+    <div class="brand">
+      {% if settings and settings.logo_url %}
+      <div class="brand-logo" style="background:none;overflow:hidden"><img src="{{ settings.logo_url }}" alt="" style="width:100%;height:100%;object-fit:cover" onerror="this.parentElement.innerHTML='<i class=&quot;ti ti-phone&quot; style=&quot;font-size:14px;color:white&quot;></i>';this.parentElement.style.background='var(--brand-primary)'"></div>
+      {% else %}
+      <div class="brand-logo"><i class="ti ti-phone" style="font-size:14px;color:white"></i></div>
+      {% endif %}
+      <span class="brand-name">{{ settings.company_name if settings else 'SIP Trunk Platform' }}</span>
+      <span style="font-size:10px;color:#888780;border-left:0.5px solid #e8e7e1;padding-left:8px;margin-left:2px">Kamailio Manager</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      {% if session.username %}
+      <span style="font-size:12px;color:#5f5e5a">{{ session.username }} <span class="badge badge-info">{{ session.get('source','local') }}</span></span>
+      <a href="/logout" class="btn btn-sm">Log out</a>
+      {% endif %}
+    </div>
+  </div>
+  <div class="body">
+    <div class="sidebar">
+      <a href="/" class="{{ 'active' if active=='dashboard' }}"><i class="ti ti-layout-dashboard"></i> <span>Dashboard</span></a>
+      <a href="/nodes" class="{{ 'active' if active=='nodes' }}"><i class="ti ti-server-2"></i> <span>Nodes</span></a>
+      <a href="/domains" class="{{ 'active' if active=='domains' }}"><i class="ti ti-world"></i> <span>Domains</span></a>
+      <a href="/media-profiles" class="{{ 'active' if active=='media_profiles' }}"><i class="ti ti-broadcast"></i> <span>Media Profiles</span></a>
+      <a href="/rate-plans" class="{{ 'active' if active=='rate_plans' }}"><i class="ti ti-coin"></i> <span>Rate Plans</span></a>
+      <a href="/acls" class="{{ 'active' if active=='acls' }}"><i class="ti ti-shield-lock"></i> <span>Access Control Lists</span></a>
+      <a href="/blocklists" class="{{ 'active' if active=='blocklists' }}"><i class="ti ti-ban"></i> <span>Blocklists</span></a>
+      <!-- Alerts moved to the Dashboard (below the Nodes table), not a separate nav item anymore -->
+      <a href="/certificates" class="{{ 'active' if active=='certificates' }}"><i class="ti ti-certificate"></i> <span>Certificates</span></a>
+      <a href="/settings" class="{{ 'active' if active=='settings' }}"><i class="ti ti-settings"></i> <span>Settings</span></a>
+      <a href="/audit-log" class="{{ 'active' if active=='audit_log' }}"><i class="ti ti-clipboard-list"></i> <span>Audit Log</span></a>
+      <a href="/cdrs" class="{{ 'active' if active=='cdrs' }}"><i class="ti ti-phone-calling"></i> <span>Call Detail Records</span></a>
+    </div>
+    <div class="content">
+      {% if flash_msg %}
+      <div class="flash {{ 'flash-ok' if flash_ok else 'flash-err' }}">
+        <i class="ti {{ 'ti-check' if flash_ok else 'ti-alert-circle' }}"></i> {{ flash_msg }}
+      </div>
+      {% endif %}
+      <div class="main">
+        {% block content %}{% endblock %}
+      </div>
+    </div>
+  </div>
+</div>
+<div id="help-icon-overlay"></div>
+<div id="help-icon-panel"><span id="help-icon-panel-close" title="Close">&#10005;</span><b id="help-icon-panel-title"></b><p id="help-icon-panel-body"></p></div>
+<script>
+// Searchable combobox -- progressive enhancement over any
+// <select data-searchable>. If this script fails to run for any
+// reason, the plain <select> underneath is left fully visible and
+// functional (it's never hidden until this successfully initializes
+// it), so the form still works either way.
+document.addEventListener('DOMContentLoaded', function() {
+  document.querySelectorAll('select[data-searchable]').forEach(function(sel) {
+    var options = Array.prototype.map.call(sel.options, function(o) {
+      return {value: o.value, label: o.textContent, selected: o.selected};
+    });
+
+    var wrap = document.createElement('div');
+    wrap.className = 'combo-wrap';
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'combo-input';
+    input.autocomplete = 'off';
+    input.placeholder = sel.getAttribute('data-placeholder') || 'Type to search...';
+    var current = options.find(function(o) { return o.selected && o.value !== ''; });
+    input.value = current ? current.label : '';
+    var list = document.createElement('div');
+    list.className = 'combo-list';
+
+    sel.parentNode.insertBefore(wrap, sel);
+    wrap.appendChild(input);
+    wrap.appendChild(list);
+    sel.style.display = 'none';
+    wrap.appendChild(sel);
+
+    var activeIdx = -1;
+
+    function renderList(filter) {
+      list.innerHTML = '';
+      var f = (filter || '').toLowerCase();
+      var shown = options.filter(function(o) {
+        return o.value !== '' && o.label.toLowerCase().indexOf(f) !== -1;
+      });
+      if (shown.length === 0) {
+        var empty = document.createElement('div');
+        empty.className = 'combo-empty';
+        empty.textContent = 'No matches';
+        list.appendChild(empty);
+        return;
+      }
+      shown.forEach(function(o, i) {
+        var row = document.createElement('div');
+        row.className = 'combo-opt' + (i === activeIdx ? ' active' : '');
+        row.textContent = o.label;
+        row.addEventListener('mousedown', function(e) {
+          e.preventDefault();
+          choose(o);
+        });
+        list.appendChild(row);
+      });
+    }
+
+    function choose(opt) {
+      sel.value = opt.value;
+      input.value = opt.label;
+      sel.dispatchEvent(new Event('change', {bubbles: true}));
+      close();
+    }
+
+    function open() {
+      activeIdx = -1;
+      renderList(input.value === (current ? current.label : '') ? '' : input.value);
+      list.classList.add('open');
+      // Same clipping bug help_icon had, same fix: .card has
+      // overflow:hidden, and this list's height (up to 220px) isn't
+      // accounted for by the card's own height when the card's normal-
+      // flow content (e.g. a codec table with few/no rows yet) is
+      // shorter than that -- confirmed as the actual root cause, not
+      // guessed. Reparenting to document.body with real fixed
+      // coordinates escapes any ancestor's overflow:hidden entirely,
+      // regardless of how short the card currently is.
+      if (list.parentElement !== document.body) document.body.appendChild(list);
+      var rect = input.getBoundingClientRect();
+      list.style.position = 'fixed';
+      list.style.top = (rect.bottom + 4) + 'px';
+      list.style.left = rect.left + 'px';
+      list.style.right = 'auto';
+      list.style.width = rect.width + 'px';
+    }
+    function close() { list.classList.remove('open'); }
+
+    input.addEventListener('focus', open);
+    input.addEventListener('input', function() {
+      activeIdx = -1;
+      renderList(input.value);
+      list.classList.add('open');
+    });
+    input.addEventListener('blur', function() { setTimeout(close, 150); });
+    input.addEventListener('keydown', function(e) {
+      var rows = list.querySelectorAll('.combo-opt');
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        activeIdx = Math.min(activeIdx + 1, rows.length - 1);
+        renderList(input.value);
+        list.classList.add('open');
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        activeIdx = Math.max(activeIdx - 1, 0);
+        renderList(input.value);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        var visible = options.filter(function(o) { return o.value !== '' && o.label.toLowerCase().indexOf(input.value.toLowerCase()) !== -1; });
+        if (activeIdx >= 0 && visible[activeIdx]) { choose(visible[activeIdx]); }
+      } else if (e.key === 'Escape') {
+        close();
+      }
+    });
+  });
+});
+
+// Help icon (?) popovers -- single shared panel/overlay for the
+// whole page (rendered once in this same file, already outside any
+// .card), populated from the clicked button's own data attributes on
+// each open. Simpler than an earlier per-instance design (each
+// help_icon() call rendering its own panel+overlay pair) -- that
+// version had real, hard-to-pin-down bugs once multiple instances
+// existed on one page; this removes that whole class of problem by
+// only ever having one panel/overlay in the DOM, full stop.
+(function() {
+  var panel = document.getElementById('help-icon-panel');
+  var overlay = document.getElementById('help-icon-overlay');
+  var titleEl = document.getElementById('help-icon-panel-title');
+  var bodyEl = document.getElementById('help-icon-panel-body');
+  var openBtn = null;
+
+  function closeHelp() {
+    panel.classList.remove('help-icon-open');
+    overlay.classList.remove('help-icon-open');
+    openBtn = null;
+  }
+
+  function openHelp(btn) {
+    titleEl.textContent = btn.getAttribute('data-help-title') || '';
+    bodyEl.textContent = btn.getAttribute('data-help-body') || '';
+
+    var rect = btn.getBoundingClientRect();
+    panel.style.display = 'block'; // measure real height before positioning
+    var panelRect = panel.getBoundingClientRect();
+    var spaceAbove = rect.top;
+    var renderAbove = spaceAbove >= (panelRect.height + 12);
+    panel.style.top = renderAbove ? (rect.top - panelRect.height - 8) + 'px' : (rect.bottom + 8) + 'px';
+    var left = rect.left;
+    var maxLeft = window.innerWidth - panelRect.width - 12;
+    if (left > maxLeft) left = Math.max(12, maxLeft);
+    panel.style.left = left + 'px';
+
+    panel.classList.add('help-icon-open');
+    overlay.classList.add('help-icon-open');
+    openBtn = btn;
+  }
+
+  document.addEventListener('click', function(e) {
+    if (e.target.closest('#help-icon-panel-close')) {
+      e.preventDefault();
+      closeHelp();
+      return;
+    }
+    var btn = e.target.closest('.help-icon-btn');
+    if (btn) {
+      e.preventDefault();
+      if (openBtn === btn) { closeHelp(); } else { openHelp(btn); }
+      return;
+    }
+    // Real bug found and fixed this session: the overlay used to sit
+    // on top of the whole viewport and physically intercept the
+    // dismissing click, so clicking another field closed the panel
+    // but never reached that field -- confirmed via a real browser
+    // test (Playwright) that document.activeElement stayed <body>
+    // after that first click, requiring a second click to actually
+    // focus anything. The overlay is now pointer-events:none (see its
+    // CSS), so this check alone is what closes the panel -- clicking
+    // anywhere outside it, including directly on another field,
+    // closes the panel AND still reaches that field in the same
+    // click, as expected.
+    if (openBtn && !e.target.closest('#help-icon-panel')) {
+      closeHelp();
+    }
+  });
+  window.addEventListener('resize', closeHelp);
+})();
+</script>
+<script>
+// Live search-as-you-type AND click-to-sort column headers, for any
+// table wrapped in a [data-live-region] container (see
+// _toolbar.html's doc comment). Event delegation, so this works for
+// any table added later without needing page-specific JS -- just the
+// wrapper div convention.
+(function() {
+  var debounceTimer = null;
+  var DEBOUNCE_MS = 350;
+
+  // Shared by both live search and click-to-sort: fetches url,
+  // swaps in the matching [data-live-region]'s new content, restores
+  // focus to focusEl's replacement if given, keeps every OTHER
+  // region's hidden "preserve this param" fields in sync, and
+  // updates the address bar without a real navigation.
+  function applyLiveUpdate(region, url, focusEl, cursorPos) {
+    var regionId = region.getAttribute('data-live-region');
+    var params = new URL(url, window.location.origin).searchParams;
+
+    fetch(url, {headers: {'X-Live-Search': '1', 'Accept': 'application/json'}})
+      .then(function(r) { return r.text(); })
+      .then(function(html) {
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        var newRegion = doc.querySelector('[data-live-region="' + regionId + '"]');
+        if (!newRegion) return;
+        region.innerHTML = newRegion.innerHTML;
+
+        // Replacing innerHTML destroys the old focused element -- if
+        // one was given (the search box mid-typing), find its
+        // replacement and restore focus + cursor position, or
+        // continuous typing would get interrupted after every
+        // character. Sort-header clicks don't pass one.
+        if (focusEl) {
+          var newInput = region.querySelector('[data-live-search]');
+          if (newInput) {
+            newInput.focus();
+            try { newInput.setSelectionRange(cursorPos, cursorPos); } catch (e) {}
+          }
+        }
+
+        // Real bug found via multi-region testing: OTHER live-regions
+        // on the page carry hidden fields preserving THIS region's
+        // params (the toolbar macro's own "don't reset other
+        // sections" mechanism) -- those go stale after this AJAX
+        // update since they live outside what just got replaced. Sync
+        // every other region's matching named fields to the values
+        // that were just submitted, so if another section searches
+        // next, it doesn't silently revert this one.
+        document.querySelectorAll('[data-live-region]').forEach(function(otherRegion) {
+          if (otherRegion === region) return;
+          params.forEach(function(value, key) {
+            var field = otherRegion.querySelector('[name="' + key + '"]');
+            if (field) { field.value = value; }
+          });
+        });
+
+        // Keep the address bar in sync so refresh/back/forward and
+        // copy-pasted links reflect the current filter/sort -- doesn't
+        // reload the page itself.
+        history.replaceState(null, '', url);
+      })
+      .catch(function() {
+        // Network hiccup: fall back to a normal navigation rather
+        // than leaving the user stuck with a control that silently
+        // does nothing.
+        window.location.href = url;
+      });
+  }
+
+  function doLiveSearch(input) {
+    var region = input.closest('[data-live-region]');
+    var form = input.closest('form');
+    if (!region || !form) return;
+
+    var params = new URLSearchParams(new FormData(form));
+    // A new search always resets to page 1 of THIS region -- an old
+    // page number from before typing could otherwise land past the
+    // end of a now-much-shorter filtered result set.
+    var pageParam = input.getAttribute('data-page-param') || 'page';
+    params.set(pageParam, '1');
+
+    var url = window.location.pathname + '?' + params.toString();
+    applyLiveUpdate(region, url, input, input.selectionStart);
+  }
+
+  document.addEventListener('input', function(e) {
+    if (!e.target.matches('[data-live-search]')) return;
+    clearTimeout(debounceTimer);
+    var input = e.target;
+    debounceTimer = setTimeout(function() { doLiveSearch(input); }, DEBOUNCE_MS);
+  });
+
+  // Other filter controls sharing the same form/region (Type, etc.)
+  // should also apply live rather than needing a manual Apply click,
+  // for the same "no unnecessary page reloads" reason.
+  document.addEventListener('change', function(e) {
+    if (!e.target.matches('[data-live-region] select, [data-live-region] input[type=checkbox]')) return;
+    var searchInput = e.target.closest('[data-live-region]').querySelector('[data-live-search]');
+    if (searchInput) { doLiveSearch(searchInput); }
+  });
+
+  // Click-to-sort column headers -- the href is fully server-rendered
+  // (current filters preserved, sort direction already toggled), so
+  // this just needs to fetch it live instead of navigating.
+  document.addEventListener('click', function(e) {
+    var link = e.target.closest('[data-live-sort]');
+    if (!link) return;
+    var region = link.closest('[data-live-region]');
+    if (!region) return;
+    e.preventDefault();
+    applyLiveUpdate(region, link.getAttribute('href'), null, null);
+  });
+})();
+</script>
+</body>
+</html>

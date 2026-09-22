@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+  <h1 style="font-size:18px;font-weight:500;margin:0">Rate Plans</h1>
+  <a href="/rate-plans/new" class="btn btn-primary"><i class="ti ti-plus"></i> Add rate plan</a>
+</div>
+<div data-live-region="q">
+{% call toolbar(page=page, total_pages=total_pages, total=total) %}
+  <div class="fg" style="margin:0"><label class="fl">Search</label><input name="q" value="{{ q }}" placeholder="plan name..." data-live-search data-page-param="page"></div>
+  {% if q %}<a href="/rate-plans" class="btn btn-sm">Clear</a>{% endif %}
+{% endcall %}
+<div class="card">
+  {% if plans %}
+  <table><thead><tr><th>Name</th><th>Description</th><th>Entries</th></tr></thead>
+  <tbody>{% for p in plans %}<tr>
+    <td><a href="/rate-plans/{{ p.id }}"><b>{{ p.name }}</b></a></td><td>{{ p.description or '' }}</td><td>{{ p.entry_count }}</td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No rate plans match. <a href="/rate-plans/new">Add your first one</a>.</div>{% endif %}
+</div>
+</div>
+{% endblock %}

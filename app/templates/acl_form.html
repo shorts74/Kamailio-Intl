@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">Add Access Control List</h1>
+<form method="POST">
+<div class="card"><div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Name {{ help_icon("Name", "Identifies this ACL when attaching it to trunks/domains/subscribers elsewhere. Purely descriptive -- doesn't affect matching behavior.") }}</label><input name="name" value="{{ acl.name or '' if acl else '' }}" required></div>
+  <div class="fg" style="grid-column:1/-1"><label class="fl">Description {{ help_icon("Description", "Optional notes for your own reference -- e.g. what this ACL is meant to represent (a specific provider's IP ranges, an office network, etc). Has no effect on matching.") }}</label><input name="description" value="{{ acl.description or '' if acl else '' }}"></div>
+</div></div>
+<button type="submit" class="btn btn-primary"><i class="ti ti-check"></i> Create ACL</button>
+<a href="/acls" class="btn">Cancel</a>
+</form>
+{% endblock %}

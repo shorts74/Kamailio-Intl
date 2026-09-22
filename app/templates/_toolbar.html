@@ -1,0 +1,73 @@
+{# Reusable toolbar macro -- filters (via {% call %} block) + Export/
+   Import/Add all in one row, top of the table, plus pagination
+   directly below that same row. Used across every paginated list
+   page so the layout/behavior is defined once, not per-page.
+
+   LIVE SEARCH-AS-YOU-TYPE (standard as of this session -- see
+   DESIGN.md §24): wrap the {% call toolbar(...) %}...{% endcall %}
+   block AND the table/card that follows it in a single
+   <div data-live-region="q"> (use the same string as q_param below --
+   just "q" for the default single-table case, or the custom q_param
+   name for a multi-section page). Give the search <input> itself
+   data-live-search and data-page-param="page" (or the custom
+   page_param). base.html's shared JS handles everything else via
+   event delegation -- no per-page script needed. Any other filter
+   control (a <select> or checkbox) inside the same data-live-region
+   also applies live automatically, no separate wiring needed.
+
+   Usage (single paginated table on the page):
+     {% from "_toolbar.html" import toolbar %}
+     <div data-live-region="q">
+     {% call toolbar(page=page, total_pages=total_pages, total=total,
+                      export_url="/acls/1/export.csv",
+                      import_url="/acls/1/import",
+                      add_url="/acls/new", add_label="Add Access Control List") %}
+       <div class="fg" style="margin:0"><label class="fl">Search</label><input name="q" value="{{ q }}" data-live-search data-page-param="page"></div>
+     {% endcall %}
+     <div class="card">...table...</div>
+     </div>
+
+   Usage (multiple independently-paginated tables on one page, e.g.
+   a domain's Users table AND its Enabled-on-SIP-Profiles table):
+   pass page_param/q_param matching whatever custom names the route's
+   pagination.paginate_query() call used (e.g. "users_page"/"users_q"),
+   and give the search input inside the {% call %} block that same
+   custom name (both as its `name` attribute AND as data-page-param).
+   Wrap each section in its own <div data-live-region="users_q"> (or
+   whatever that section's q_param is) so the two tables' live updates
+   never interfere with each other. The macro automatically preserves
+   every OTHER section's current query params as hidden fields, so
+   submitting (or live-searching) this section's filter/page doesn't
+   reset any other section's.
+#}
+{% macro toolbar(page=1, total_pages=1, total=0, export_url=none, import_url=none, add_url=none, add_label='Add', import_accept='.csv', page_param='page', q_param='q', refresh_url=none) %}
+<div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:10px;margin-bottom:8px">
+  <form method="GET" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin:0">
+    {% for k, v in request.args.items() %}{% if k != page_param and k != q_param %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endif %}{% endfor %}
+    {{ caller() if caller }}
+  </form>
+  <div style="display:flex;gap:6px;align-items:end;flex-wrap:wrap">
+    {% if refresh_url %}<a href="{{ refresh_url }}" class="btn btn-sm"><i class="ti ti-refresh"></i> Refresh</a>{% endif %}
+    {% if export_url %}<a href="{{ export_url }}" class="btn btn-sm"><i class="ti ti-download"></i> Export CSV</a>{% endif %}
+    {% if import_url %}
+    <form method="POST" action="{{ import_url }}" enctype="multipart/form-data" style="display:inline;margin:0">
+      <label class="btn btn-sm" style="cursor:pointer;margin:0">
+        <i class="ti ti-upload"></i> Import CSV
+        <input type="file" name="csv_file" accept="{{ import_accept }}" style="display:none" onchange="this.form.submit()">
+      </label>
+    </form>
+    {% endif %}
+    {% if add_url %}<a href="{{ add_url }}" class="btn btn-sm btn-primary"><i class="ti ti-plus"></i> {{ add_label }}</a>{% endif %}
+  </div>
+</div>
+{% if total_pages > 1 %}
+<div class="pagination" style="margin:0 0 10px">
+  <span>Page {{ page }} of {{ total_pages }} ({{ total }} total)</span>
+  <div class="pages">
+    {% set qs = request.args.to_dict() %}
+    {% if page > 1 %}{% set _ = qs.update({page_param: page-1}) %}<a href="?{{ qs|urlencode }}" class="btn btn-sm">Prev</a>{% set _ = qs.update({page_param: page}) %}{% endif %}
+    {% if page < total_pages %}{% set _ = qs.update({page_param: page+1}) %}<a href="?{{ qs|urlencode }}" class="btn btn-sm">Next</a>{% set _ = qs.update({page_param: page}) %}{% endif %}
+  </div>
+</div>
+{% endif %}
+{% endmacro %}

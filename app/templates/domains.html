@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% from "_sort_header.html" import sort_th %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 12px">Domains</h1>
+
+<div data-live-region="q">
+{% call toolbar(page=page, total_pages=total_pages, total=total, export_url="/domains/export.csv", import_url="/domains/import", add_url="/domains/new", add_label="Add domain") %}
+  <div class="fg" style="margin:0"><label class="fl">Search</label><input name="q" value="{{ q }}" placeholder="domain or name..." data-live-search data-page-param="page"></div>
+  <div class="fg" style="margin:0"><label class="fl">Type</label><select name="type">
+    <option value="">All</option>
+    <option value="local" {{ 'selected' if type_filter=='local' }}>Local</option>
+  </select></div>
+  {% if q or type_filter %}<a href="/domains" class="btn btn-sm">Clear</a>{% endif %}
+{% endcall %}
+
+<div class="card">
+  {% if domains %}
+  <table><thead><tr>
+    {{ sort_th("Name", "friendly_name", sort, sort_dir) }}
+    {{ sort_th("Domain", "name", sort, sort_dir) }}
+    {{ sort_th("Type", "type", sort, sort_dir) }}
+    <th>Users</th><th>SIP Profiles</th><th></th>
+  </tr></thead>
+  <tbody>{% for d in domains %}<tr>
+    <td><b>{{ d.friendly_name }}</b></td><td class="mono">{{ d.name }}</td>
+    <td><span class="badge badge-{{ 'info' if d.domain_type=='local' else 'warn' }}">{{ d.domain_type }}</span></td>
+    <td>{{ d.subscriber_count if d.domain_type == 'local' else '-' }}</td>
+    <td>{{ d.sip_profile_count }}</td>
+    <td><a href="/domains/{{ d.id }}" class="btn btn-sm">Manage</a></td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No domains match. <a href="/domains/new">Add your first domain</a>.</div>{% endif %}
+</div>
+</div>
+{% endblock %}

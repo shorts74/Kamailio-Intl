@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">Add rate plan</h1>
+<form method="POST">
+<div class="card"><div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Name</label><input name="name" value="{{ plan.name or '' if plan else '' }}" required></div>
+  <div class="fg" style="grid-column:1/-1"><label class="fl">Description</label><input name="description"></div>
+</div></div>
+<button type="submit" class="btn btn-primary"><i class="ti ti-check"></i> Create rate plan</button>
+<a href="/rate-plans" class="btn">Cancel</a>
+</form>
+{% endblock %}

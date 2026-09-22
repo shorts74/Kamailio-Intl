@@ -1,0 +1,51 @@
+{# Shared destination-type selector -- used by Blocklist and Bridge
+   routing plan configuration, since both need the same "where does
+   this call go" model. Requires trunks/subscriber_lookup_tables/
+   local_domains/existing_profiles in context (same names the calling
+   template already has available). `profile` (None/undefined on
+   create) pre-populates the current saved destination when editing. #}
+<div class="fg" style="margin-bottom:10px">
+  <label class="fl">Destination type {{ help_icon("Destination type", "Where a matching call is sent. Trunk: an outbound trunk or gateway group. Subscriber lookup: resolve via a number-to-subscriber lookup table. Local subscriber: a specific username@domain on this platform. Jump to another plan: delegate the routing decision to a different routing plan entirely.") }}</label>
+  <select name="destination_type" class="dest-type-select">
+    {% set cur_dt = profile.destination_type if profile else None %}
+    <option value="trunk" {{ 'selected' if cur_dt=='trunk' or not cur_dt }}>Trunk / gateway group</option>
+    <option value="subscriber_lookup" {{ 'selected' if cur_dt=='subscriber_lookup' }}>Subscriber lookup</option>
+    <option value="local_subscriber" {{ 'selected' if cur_dt=='local_subscriber' }}>Local subscriber</option>
+    <option value="jump_profile" {{ 'selected' if cur_dt=='jump_profile' }}>Another routing plan (jump)</option>
+  </select>
+</div>
+<div class="dest-fields" data-for="trunk" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+  <div class="fg"><label class="fl">Trunk / gateway group</label><select name="dest_trunk_setid">
+    <option value="">Select...</option>{% for t in trunks %}<option value="{{ t.setid }}" {{ 'selected' if profile and profile.dest_trunk_setid==t.setid }}>{{ t.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">Failover trunk (optional)</label><select name="dest_failover_setid">
+    <option value="">None</option>{% for t in trunks %}<option value="{{ t.setid }}" {{ 'selected' if profile and profile.dest_failover_setid==t.setid }}>{{ t.name }}</option>{% endfor %}
+  </select></div>
+</div>
+<div class="dest-fields" data-for="local_subscriber" style="display:none;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+  <div class="fg"><label class="fl">Username</label><input name="dest_username" value="{{ profile.dest_username or '' if profile else '' }}" placeholder="username"></div>
+  <div class="fg"><label class="fl">Domain</label><input name="dest_domain" value="{{ profile.dest_domain or '' if profile else '' }}" placeholder="example.com"></div>
+</div>
+<div class="dest-fields" data-for="jump_profile" style="display:none;margin-bottom:10px">
+  <div class="fg"><label class="fl">Routing plan</label><select name="dest_jump_profile_id">
+    <option value="">Select...</option>{% for p in existing_profiles %}<option value="{{ p.id }}" {{ 'selected' if profile and profile.dest_jump_profile_id==p.id }}>{{ p.name }}</option>{% endfor %}
+  </select></div>
+</div>
+<div class="dest-fields" data-for="subscriber_lookup" style="display:none;margin-bottom:10px">
+  <div style="font-size:12px;color:var(--text-secondary)">Resolves via the number-to-subscriber lookup table already configured for this node -- no additional fields needed here.</div>
+</div>
+<script>
+(function() {
+  var selects = document.querySelectorAll('.dest-type-select');
+  selects.forEach(function(sel) {
+    function update() {
+      var container = sel.closest('div').parentElement;
+      container.querySelectorAll('.dest-fields').forEach(function(df) {
+        df.style.display = df.dataset.for === sel.value ? '' : 'none';
+      });
+    }
+    sel.addEventListener('change', update);
+    update();
+  });
+})();
+</script>

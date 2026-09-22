@@ -1,0 +1,3 @@
+{% for r in inbound_registrations %}
+<tr><td class="mono">{{ r.aor }}</td><td class="mono">{{ r.Address }}</td><td>{{ r.Expires }}s</td><td>{{ r['User-Agent'] }}</td><td class="mono">{{ r.Socket }}</td></tr>
+{% endfor %}

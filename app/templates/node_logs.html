@@ -1,0 +1,241 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "_node_tabs.html" %}
+{% include "_pending_banner.html" %}
+
+<div class="card" id="output-card" style="display:none">
+<div class="card-head" style="display:flex;justify-content:space-between;align-items:center">
+  <span class="card-title" id="output-title">Output</span>
+  <span>
+    <button type="button" class="btn btn-sm" onclick="downloadOutput()"><i class="ti ti-download"></i> Download</button>
+    <button type="button" class="btn btn-sm" onclick="document.getElementById('output-card').style.display='none'; stopLiveTail();">Close</button>
+  </span>
+</div>
+<pre id="output-pre" style="padding:16px;margin:0;font-size:12px;white-space:pre-wrap;word-break:break-all;max-height:500px;overflow-y:auto;background:#1e1e1e;color:#d4d4d4;border-radius:0 0 8px 8px">Loading...</pre>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Log level</span></div>
+<div style="padding:16px;display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+  <div class="fg" style="margin:0"><label class="fl">Kamailio debug level</label>
+    <select id="loglevel-select" style="width:220px">
+      <option value="-3">-3 (alert only)</option>
+      <option value="-2">-2 (critical)</option>
+      <option value="-1">-1 (error)</option>
+      <option value="0">0 (warning)</option>
+      <option value="1">1 (notice)</option>
+      <option value="2" selected>2 (info -- default)</option>
+      <option value="3">3 (debug)</option>
+      <option value="4">4 (debug, very verbose)</option>
+    </select>
+  </div>
+  <button type="button" class="btn btn-sm btn-primary" onclick="setLogLevel()">Apply live</button>
+  <span id="loglevel-result" style="font-size:12px"></span>
+</div>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">Takes effect immediately via <code>kamcmd cfg.set_now_int core debug</code> -- no restart needed. Not persisted: reverts to the modparam catalog's value (Node Settings) on the next restart. Set it there too if you want it to stick.</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Quick actions</span></div>
+<div style="padding:16px;display:flex;gap:8px;flex-wrap:wrap">
+  <button type="button" class="btn btn-sm" onclick="runQuickAction('{{ url_for('web.node_logs_settings_snapshot', node_id=node.id) }}', 'Node Settings')"><i class="ti ti-file-text"></i> Node Settings</button>
+  <button type="button" class="btn btn-sm" onclick="runQuickAction('{{ url_for('web.node_logs_snapshot', node_id=node.id) }}', 'System snapshot')">System snapshot (load / memory / disk / top)</button>
+  <button type="button" class="btn btn-sm" onclick="runQuickAction('{{ url_for('web.node_logs_redis', node_id=node.id) }}', 'Redis status')">Redis status</button>
+  <button type="button" class="btn btn-sm" onclick="runQuickAction('{{ url_for('web.node_logs_firewall_status', node_id=node.id) }}', 'Firewall status', true)">Firewall status (iptables/ip6tables)</button>
+  <button type="button" class="btn btn-sm" onclick="runQuickAction('{{ url_for('web.node_logs_routing_summary', node_id=node.id) }}', 'Routing summary (last 50 calls)')"><i class="ti ti-route"></i> Latest routing summary (last 50 calls)</button>
+  {% for svc in services %}
+  <button type="button" class="btn btn-sm" onclick="runServiceCheck('{{ svc }}')">{{ svc }} status</button>
+  {% endfor %}
+  {% for key, entry in config_files.items() %}
+  <button type="button" class="btn btn-sm" onclick="runConfigFileView('{{ key }}', '{{ entry[0] }}')"><i class="ti ti-file-text"></i> {{ entry[0] }}</button>
+  {% endfor %}
+</div>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">The settings snapshot covers node settings, every modparam's effective value, response-reason overrides, SIP Profiles/listeners/identity, firewall rules/IP lists, trunks (full, every field), domains, routing profiles/rules, media profiles, rate limit pipes, and gateway groups -- everything needed for a complete debugging picture in one file. No real passwords/secrets are ever included; the one credential-shaped field in scope is masked, not shown.</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Network</span></div>
+<div style="padding:16px;display:flex;gap:8px;flex-wrap:wrap">
+  <button type="button" class="btn btn-sm" onclick="runQuickAction('{{ url_for('web.node_logs_network', node_id=node.id, view='interfaces') }}', 'Interfaces', true)">Interfaces</button>
+  <button type="button" class="btn btn-sm" onclick="runQuickAction('{{ url_for('web.node_logs_network', node_id=node.id, view='routes') }}', 'Route table', true)">Route table</button>
+  <button type="button" class="btn btn-sm" onclick="runQuickAction('{{ url_for('web.node_logs_network', node_id=node.id, view='listening') }}', 'Listening ports', true)">Listening ports</button>
+  <button type="button" class="btn btn-sm" onclick="runQuickAction('{{ url_for('web.node_logs_network', node_id=node.id, view='sockets') }}', 'Socket streams', true)">Socket streams (all states)</button>
+  <button type="button" class="btn btn-sm" onclick="runQuickAction('{{ url_for('web.node_logs_network', node_id=node.id, view='stats') }}', 'Protocol statistics', true)">Protocol statistics</button>
+</div>
+<div style="padding:0 16px 16px;display:flex;gap:8px;align-items:end;flex-wrap:wrap;border-top:1px solid #eee;padding-top:16px">
+  <div class="fg" style="margin:0"><label class="fl">DNS resolve test</label><input id="dns-hostname" style="width:220px" placeholder="sip.carrier-example.com"></div>
+  <button type="button" class="btn btn-sm" onclick="runDnsTest()">Resolve</button>
+  <div class="fg" style="margin:0"><label class="fl">Ping test</label><input id="ping-target" style="width:220px" placeholder="8.8.8.8 or sip.carrier-example.com"></div>
+  <button type="button" class="btn btn-sm" onclick="runPingTest()">Ping</button>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">kamcmd</span></div>
+<div style="padding:16px">
+  <p style="font-size:11px;color:#888780;margin:0 0 10px">
+    Curated list of read-only kamcmd commands -- verified individually against Kamailio's own RPC docs, scoped to modules this node actually loads.
+    State-changing commands (reload, set, remove, terminate, etc.) are deliberately not available here.
+  </p>
+  <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+    <div class="fg" style="margin:0"><label class="fl">Command</label>
+      <select id="kamcmd-select" style="width:260px" onchange="document.getElementById('kamcmd-help').textContent = this.options[this.selectedIndex].dataset.help">
+        {% for cmd, help in kamcmd_commands.items() %}<option value="{{ cmd }}" data-help="{{ help }}">{{ cmd }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="fg" style="margin:0"><label class="fl">Params (optional, space-separated)</label><input id="kamcmd-params" style="width:220px" placeholder="e.g. location alice"></div>
+    <button type="button" class="btn btn-sm" onclick="runKamcmd()">Run</button>
+  </div>
+  <div id="kamcmd-help" style="margin-top:8px;font-size:11px;color:#888780"></div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">htable inspection -- quick actions</span></div>
+<div style="padding:16px">
+  <p style="font-size:11px;color:#888780;margin:0 0 10px">
+    One-click dump of any htable this node currently defines -- same as running kamcmd htable.dump above, without selecting it from the dropdown and typing the name.
+  </p>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    {% for name, help in htables.items() %}
+    <button type="button" class="btn btn-sm" title="{{ help }}" onclick="dumpHtable('{{ name }}')">{{ name }}</button>
+    {% endfor %}
+    <button type="button" class="btn btn-sm" title="The permissions module's address table -- every trunk primary IP, trunk ACL entry, domain ACL entry, and subscriber ACL entry currently loaded (grp=1 for trunks, grp=10000+/20000+domain_id for domain allow/deny, grp=30000+subscriber_id for subscriber ACLs). Not technically an htable, but the actual consolidation point for CIDR-based trust across this whole platform." onclick="dumpAddressTable()">address</button>
+  </div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Log files</span></div>
+<div style="padding:16px;display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+  <div class="fg" style="margin:0"><label class="fl">Log</label>
+    <select id="log-select">
+      {% for key, path in log_files.items() %}<option value="{{ key }}">{{ key }} ({{ path }})</option>{% endfor %}
+    </select>
+  </div>
+  <div class="fg" style="margin:0"><label class="fl">Last N lines {{ help_icon("Last N lines", "Shows the most recent lines from the end of the file (like the tail command), not from the beginning -- the newest entries are always what you see.") }}</label><input id="log-lines" type="number" value="100" style="width:80px"></div>
+  <div class="fg" style="margin:0"><label class="fl">Search (optional) {{ help_icon("Search", "Searches within the last 5000 lines of the file, then shows the most recent N matches (per Last N lines above) -- not a search of the entire file history.") }}</label><input id="log-search" style="width:200px" placeholder="grep -i ..."></div>
+  <button type="button" class="btn btn-sm" onclick="fetchLog()">View</button>
+  <label style="font-size:12px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="log-tail-toggle" onchange="toggleLiveTail()"> Live tail (polls every 5s)</label>
+</div></div>
+
+<script>
+let tailInterval = null;
+
+function showOutput(title, text) {
+  document.getElementById('output-card').style.display = 'block';
+  document.getElementById('output-title').textContent = title;
+  document.getElementById('output-pre').textContent = text;
+  document.getElementById('output-card').scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+function downloadOutput() {
+  const title = document.getElementById('output-title').textContent || 'output';
+  const text = document.getElementById('output-pre').textContent || '';
+  const safeName = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'output';
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const blob = new Blob([text], {type: 'text/plain'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = safeName + '-' + ts + '.txt';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function postAndShow(url, title, body) {
+  showOutput(title, 'Loading...');
+  try {
+    const res = await fetch(url, { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json'}, body: new URLSearchParams(body || {}) });
+    if (!res.ok && res.status === 401) {
+      document.getElementById('output-pre').textContent = 'Your session has expired -- please refresh the page and log in again.';
+      return;
+    }
+    const data = await res.json();
+    document.getElementById('output-pre').textContent = data.result || (data.error || 'No output');
+  } catch (e) {
+    document.getElementById('output-pre').textContent = 'Request failed: ' + e;
+  }
+}
+
+async function getAndShow(url, title) {
+  showOutput(title, 'Loading...');
+  try {
+    const res = await fetch(url, { headers: {'Accept': 'application/json'} });
+    if (!res.ok && res.status === 401) {
+      document.getElementById('output-pre').textContent = 'Your session has expired -- please refresh the page and log in again.';
+      return;
+    }
+    const data = await res.json();
+    document.getElementById('output-pre').textContent = data.result || (data.error || 'No output');
+  } catch (e) {
+    document.getElementById('output-pre').textContent = 'Request failed: ' + e;
+  }
+}
+
+function runQuickAction(url, title, isGet) { stopLiveTail(); isGet ? getAndShow(url, title) : postAndShow(url, title); }
+function runServiceCheck(svc) { stopLiveTail(); postAndShow('{{ url_for('web.node_logs_service', node_id=node.id) }}', svc + ' status', {service: svc}); }
+function runConfigFileView(fileKey, title) { stopLiveTail(); postAndShow('{{ url_for('web.node_logs_config_file', node_id=node.id) }}', title, {file_key: fileKey}); }
+
+function runDnsTest() {
+  stopLiveTail();
+  const hostname = document.getElementById('dns-hostname').value.trim();
+  if (!hostname) { showOutput('DNS test', 'Enter a hostname first.'); return; }
+  postAndShow('{{ url_for('web.node_logs_dns_test', node_id=node.id) }}', 'DNS: ' + hostname, {hostname: hostname});
+}
+
+function runPingTest() {
+  stopLiveTail();
+  const target = document.getElementById('ping-target').value.trim();
+  if (!target) { showOutput('Ping test', 'Enter a target first.'); return; }
+  postAndShow('{{ url_for('web.node_logs_ping_test', node_id=node.id) }}', 'Ping: ' + target, {target: target});
+}
+
+function runKamcmd() {
+  stopLiveTail();
+  const cmd = document.getElementById('kamcmd-select').value;
+  const params = document.getElementById('kamcmd-params').value;
+  postAndShow('{{ url_for('web.node_logs_kamcmd', node_id=node.id) }}', 'kamcmd ' + cmd + (params ? ' ' + params : ''), {command: cmd, params: params});
+}
+
+function dumpHtable(name) {
+  stopLiveTail();
+  postAndShow('{{ url_for('web.node_logs_kamcmd', node_id=node.id) }}', 'kamcmd htable.dump ' + name, {command: 'htable.dump', params: name});
+}
+
+function dumpAddressTable() {
+  stopLiveTail();
+  postAndShow('{{ url_for('web.node_logs_kamcmd', node_id=node.id) }}', 'kamcmd permissions.addressDump', {command: 'permissions.addressDump', params: ''});
+}
+
+function fetchLog() {
+  stopLiveTail();
+  const logKey = document.getElementById('log-select').value;
+  const lines = document.getElementById('log-lines').value;
+  const search = document.getElementById('log-search').value;
+  postAndShow('{{ url_for('web.node_logs_tail', node_id=node.id) }}', logKey, {log_key: logKey, lines: lines, search: search});
+}
+
+function toggleLiveTail() {
+  const on = document.getElementById('log-tail-toggle').checked;
+  if (on) {
+    fetchLog();
+    tailInterval = setInterval(fetchLog, 5000);
+  } else {
+    stopLiveTail();
+  }
+}
+
+function stopLiveTail() {
+  if (tailInterval) { clearInterval(tailInterval); tailInterval = null; }
+  document.getElementById('log-tail-toggle').checked = false;
+}
+
+async function setLogLevel() {
+  const level = document.getElementById('loglevel-select').value;
+  const resultSpan = document.getElementById('loglevel-result');
+  resultSpan.textContent = 'Applying...';
+  try {
+    const res = await fetch('{{ url_for('web.node_logs_set_level', node_id=node.id) }}', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: new URLSearchParams({level: level}) });
+    const data = await res.json();
+    resultSpan.textContent = data.ok ? 'Applied.' : ('Failed: ' + data.result);
+    resultSpan.style.color = data.ok ? '#2d7a3a' : '#a32d2d';
+  } catch (e) {
+    resultSpan.textContent = 'Request failed.';
+    resultSpan.style.color = '#a32d2d';
+  }
+}
+</script>
+{% endblock %}

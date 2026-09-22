@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% from "_sync_pending_button.html" import sync_pending_group %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+{% include "_node_tabs.html" %}
+{% include "_pending_banner.html" %}
+
+<div data-live-region="q">
+{% call toolbar(page=page, total_pages=total_pages, total=total) %}
+  <div class="fg" style="margin:0"><label class="fl">Search name</label><input name="q" value="{{ q }}" placeholder="trunk name..." data-live-search data-page-param="page"></div>
+{% endcall %}
+
+<div class="card"><div class="card-head"><span class="card-title">Trunks</span>
+  {{ sync_pending_group(node.id, routing_sync_pending, "/nodes/" ~ node.id ~ "/trunks/new", "Add trunk") }}</div>
+  {% if trunks %}
+  <table><thead><tr><th>Name</th><th>Type</th><th>Local</th><th>Remote</th><th>Group</th><th>Routing Plan</th><th>State</th><th>Status</th><th>Channels</th><th>Calls (1h)</th><th></th></tr></thead>
+  <tbody>{% for t in trunks %}<tr>
+    <td><a href="/trunks/{{ t.id }}/edit"><b>{{ t.name }}</b></a><br><span style="font-size:10px;color:var(--muted,#888)">dispatcher: {{ 1000 + t.id }}</span></td>
+    <td><span class="badge {{ 'badge-info' if t.trunk_type == 'provider' else '' }}" style="{{ '' if t.trunk_type == 'provider' else 'background:#eee;color:#5f5e5a' }}">{{ 'Provider' if t.trunk_type == 'provider' else 'Peer' }}</span></td>
+    <td><span class="badge badge-info">{{ t.sip_profile_name }}</span><br><span class="mono" style="font-size:11px">{{ t.local_ip }}:{{ t.local_port }}:{{ t.transport|upper }}</span></td>
+    <td><span class="mono" style="font-size:11px">{{ t.ip_addr }}:{{ t.port }}</span>{% if not t.has_trust_source %} <span title="No valid trust source -- inbound calls from this trunk will never be identified. IP-mode trunks need an attached ACL, or IP/hostname or Outbound proxy set to a literal IP (a DNS-resolved IP is never trusted)."><i class="ti ti-alert-triangle" style="color:#b8860b"></i></span>{% endif %}<br><span class="mono" style="font-size:11px;color:var(--muted,#888)">{% if t.auth_user %}{{ t.auth_user }}@{{ t.auth_realm or t.ip_addr }}{% else %}-{% endif %}</span></td>
+    <td>{{ t.group_name or '-' }}</td>
+    <td>{% if t.routing_plan_name %}{{ t.routing_plan_name }}{% else %}<span title="No routing plan assigned -- inbound calls from this trunk will get 404 No Route Found"><i class="ti ti-alert-triangle" style="color:#b8860b"></i> None</span>{% endif %}</td>
+    <td>{% if t.enabled %}<span class="badge badge-ok">Active</span>{% else %}<span class="badge badge-bad">Disabled</span>{% endif %}</td>
+    <td>
+      {% if t.live_status_detail == 'Registered' %}<span class="badge badge-ok">Registered</span>
+      {% elif t.live_status_detail == 'Up' %}<span class="badge badge-ok">Up</span>
+      {% elif t.live_status_detail == 'Unregistered' %}<span class="badge badge-warn">Unregistered</span>
+      {% elif t.live_status_detail == 'Down' %}<span class="badge badge-bad">Down</span>
+      {% elif t.live_status_detail == 'Disabled' %}<span class="badge" style="background:#eee;color:#5f5e5a">--</span>
+      {% elif t.live_status_detail == 'Unknown' %}<span class="badge badge-warn">Unreachable</span>
+      {% else %}<span class="badge badge-info">Not checked</span>{% endif %}
+      {% if t.live_status_uac_flags is not none and t.live_status_detail in ('Unregistered', 'Down') %}
+      <div style="font-size:10px;color:#888780;margin-top:2px" title="raw flags={{ t.live_status_uac_flags }}">
+        {% for bit, name, desc in decode_uac_flags(t.live_status_uac_flags) %}<span title="{{ desc }}">{{ name }}</span>{% if not loop.last %}, {% endif %}{% endfor %}
+      </div>
+      {% endif %}
+      {% if t.live_status_checked_at %}<br><span style="font-size:11px;color:#888780" title="{{ t.live_status_checked_at }}">as of {{ t.live_status_checked_at|time_ago }}</span>{% endif %}
+    </td>
+    <td>
+      {% if t.max_channels %}
+        <span class="{{ 'badge-bad' if (t.current_calls or 0) >= t.max_channels else 'badge-warn' if (t.current_calls or 0) >= (t.max_channels * 0.8) else '' }}" style="font-size:12px">{{ t.current_calls or 0 }}/{{ t.max_channels }}</span>
+      {% else %}<span style="color:var(--muted,#888);font-size:11px">unlimited</span>{% endif %}
+    </td>
+    <td style="font-size:11px;white-space:nowrap">
+      <div>&darr; {{ t.call_stats.inbound.total_calls }}{% if t.call_stats.inbound.failed %} <span class="badge badge-bad" style="font-size:9px">{{ t.call_stats.inbound.failed }} failed</span>{% endif %}</div>
+      <div>&uarr; {{ t.call_stats.outbound.total_calls }}{% if t.call_stats.outbound.failed %} <span class="badge badge-bad" style="font-size:9px">{{ t.call_stats.outbound.failed }} failed</span>{% endif %}</div>
+      {% if t.call_stats.inbound.avg_mos or t.call_stats.outbound.avg_mos %}
+      <div style="color:#888780">MOS {{ '%.2f'|format(t.call_stats.inbound.avg_mos) if t.call_stats.inbound.avg_mos else '-' }} / {{ '%.2f'|format(t.call_stats.outbound.avg_mos) if t.call_stats.outbound.avg_mos else '-' }}</div>
+      {% endif %}
+    </td>
+    <td style="white-space:nowrap">
+      <div style="display:flex;gap:4px;flex-wrap:wrap">
+        <a href="/trunks/{{ t.id }}/refresh-status" class="btn btn-sm" title="Refresh live status"><i class="ti ti-refresh"></i> Refresh</a>
+        <a href="/trunks/{{ t.id }}/troubleshoot" class="btn btn-sm" title="Automated troubleshoot"><i class="ti ti-stethoscope"></i> Troubleshoot</a>
+      </div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">
+        <a href="/trunks/{{ t.id }}/toggle" class="btn btn-sm"><i class="ti ti-{{ 'player-pause' if t.enabled else 'player-play' }}"></i> {{ 'Disable' if t.enabled else 'Enable' }}</a>
+        <a href="/trunks/{{ t.id }}/edit" class="btn btn-sm"><i class="ti ti-edit"></i> Edit</a>
+      </div>
+    </td>
+  </tr>{% endfor %}</tbody></table>
+  {% set unrouted_trunks = trunks|selectattr('routing_plan_name', 'equalto', none)|list %}
+  {% if unrouted_trunks %}
+  <div style="padding:8px 16px;font-size:11px;color:#b8860b"><i class="ti ti-alert-triangle"></i> {{ unrouted_trunks|length }} trunk{{ 's' if unrouted_trunks|length != 1 }} with no routing plan assigned -- inbound calls from {{ 'these' if unrouted_trunks|length != 1 else 'this trunk' }} will get 404 No Route Found.</div>
+  {% endif %}
+  {% set untrusted_trunks = trunks|rejectattr('has_trust_source')|list %}
+  {% if untrusted_trunks %}
+  <div style="padding:8px 16px;font-size:11px;color:#b8860b"><i class="ti ti-alert-triangle"></i> {{ untrusted_trunks|length }} trunk{{ 's' if untrusted_trunks|length != 1 }} with no valid trust source -- inbound calls from {{ 'these' if untrusted_trunks|length != 1 else 'this trunk' }} will never be identified. Attach an ACL, or set IP/hostname or Outbound proxy to a literal IP.</div>
+  {% endif %}
+  {% else %}<div class="empty">No trunks yet.</div>{% endif %}
+</div>
+</div>
+
+<div data-live-region="groups_q">
+{% call toolbar(page=groups_page, total_pages=groups_total_pages, total=groups_total, page_param="groups_page", q_param="groups_q") %}
+  <div class="fg" style="margin:0"><label class="fl">Search name</label><input name="groups_q" value="{{ groups_q }}" placeholder="group name..." data-live-search data-page-param="groups_page"></div>
+{% endcall %}
+
+<div class="card"><div class="card-head"><span class="card-title">Groups</span>
+  {{ sync_pending_group(node.id, routing_sync_pending, "/nodes/" ~ node.id ~ "/groups/new", "Add group") }}</div>
+  {% if groups %}
+  <table><thead><tr><th>Name</th><th>Algorithm</th><th>Register</th><th></th></tr></thead>
+  <tbody>{% for g in groups %}<tr>
+    <td><a href="/groups/{{ g.id }}/edit"><b>{{ g.name }}</b></a></td>
+    <td>{{ {'4':'Round-robin','6':'Random','8':'Priority','9':'Weight-based','10':'Call load','11':'Relative weight','12':'Parallel forking','13':'Latency-optimized','14':'RR/priority hybrid'}.get(g.dispatch_alg, g.dispatch_alg) }}</td>
+    <td>{% if g.register_enabled %}<span class="badge badge-ok">Yes</span>{% else %}-{% endif %}</td>
+    <td><a href="/groups/{{ g.id }}/edit" class="btn btn-sm"><i class="ti ti-edit"></i> Edit</a></td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No groups yet.</div>{% endif %}
+</div>
+</div>
+{% endblock %}

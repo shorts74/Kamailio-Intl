@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">Modparam Catalog</h1>
+<p style="font-size:12px;color:#888780;margin:-8px 0 16px">
+  The Manager-wide list of exposed Kamailio parameters, grouped by module. Per-node override values are set on each Node's own Settings page.
+  Changing a default here affects any node without its own override -- takes effect on that node's next Apply & Restart.
+  Looking for a module that isn't managed here yet? See the full <a href="/settings/module-reference">Module Reference</a> for every Kamailio module and what it does.
+</p>
+
+<div class="card"><div class="card-head"><span class="card-title">How module enable/disable actually works</span></div>
+<div style="padding:16px;font-size:12px;color:#555">
+  A Kamailio module is active only if it has a <code>loadmodule "name.so"</code> line in the deployed <code>kamailio.cfg</code> -- there's no separate on/off switch, loading <i>is</i> enabling. Removing that line (and any <code>modparam()</code> calls that reference it) disables it; the module's functions simply become unavailable to the routing script. This platform currently loads a fixed set of modules the same way on every node (shown as "Loaded" below) -- per-node module toggling isn't available yet.
+</div></div>
+
+{% for module, info in modules.items() %}
+<div class="card"><div class="card-head" style="display:flex;justify-content:space-between;align-items:center">
+  <span class="card-title mono">{{ module }}{% if info.loaded %} <span class="badge badge-ok" style="font-size:9px">Loaded</span>{% else %}<span class="badge badge-info" style="font-size:9px">Not loaded</span>{% endif %}</span>
+</div>
+{% if info.description %}<div style="padding:8px 16px 0;font-size:12px;color:#888780">{{ info.description }}</div>{% endif %}
+<table><thead><tr><th>Param</th><th>Type</th><th>Default</th><th>Overridden on</th><th></th></tr></thead>
+<tbody>{% for p in info.params %}<tr>
+  <td class="mono">{{ p.param_name }}</td><td>{{ p.param_type }}</td>
+  <td class="mono">{{ p.default_value }}</td>
+  <td>{{ p.override_count }} node{{ 's' if p.override_count != 1 }}</td>
+  <td>
+    <form method="POST" action="/settings/modparam-catalog/{{ p.id }}/edit" style="display:inline-flex;gap:4px">
+      <input name="default_value" value="{{ p.default_value }}" style="width:80px;padding:4px">
+      <input type="hidden" name="param_type" value="{{ p.param_type }}">
+      <input type="hidden" name="category" value="{{ p.category }}">
+      <input type="hidden" name="description" value="{{ p.description or '' }}">
+      <button type="submit" class="btn btn-sm">Save</button>
+    </form>
+    <a href="/settings/modparam-catalog/{{ p.id }}/delete" class="btn btn-sm" onclick="return confirm('Delete {{ p.param_name }}? Any per-node overrides for it will be removed too.')">Delete</a>
+  </td>
+</tr>{% endfor %}</tbody></table>
+</div>
+{% endfor %}
+
+<div class="card"><div class="card-head"><span class="card-title">Add parameter</span></div>
+<form method="POST" action="/settings/modparam-catalog/new" style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;align-items:end">
+  <div class="fg"><label class="fl">Module</label><input name="module" placeholder="core, tm, tcp..." required></div>
+  <div class="fg"><label class="fl">Param name</label><input name="param_name" required></div>
+  <div class="fg"><label class="fl">Type</label><select name="param_type">
+    <option value="string">string</option><option value="int">int</option><option value="bool">bool</option>
+  </select></div>
+  <div class="fg"><label class="fl">Default value</label><input name="default_value" required></div>
+  <div class="fg"><label class="fl">Category</label><input name="category" value="general"></div>
+  <div class="fg" style="grid-column:1/-1"><label class="fl">Description</label><input name="description"></div>
+  <div><button type="submit" class="btn btn-primary"><i class="ti ti-plus"></i> Add</button></div>
+</form>
+</div>
+{% endblock %}

@@ -1,0 +1,28 @@
+{# Shared tab bar for all node-scoped pages. `node` and `active_tab`
+   must be passed in by the including template. Back button is
+   context-aware: always backs out exactly one level (to the Nodes
+   list), never skips, never dumps somewhere unrelated. #}
+<div style="margin-bottom:12px">
+  <a href="/nodes" class="btn btn-sm"><i class="ti ti-arrow-left"></i> Back to Nodes</a>
+</div>
+<h1 style="font-size:18px;font-weight:500;margin:0 0 12px">{{ node.name }} <span class="badge badge-info">{{ node.region }}</span>
+  <span style="font-size:12px;font-weight:400;color:#888780" title="{{ node.last_routing_sync_at or 'never synced' }}"><i class="ti ti-refresh" style="font-size:12px"></i> Sync: {{ node.last_routing_sync_at|time_ago }}</span>
+</h1>
+{% include "_sync_pending_notice.html" %}
+<div style="display:flex;gap:2px;border-bottom:1.5px solid #e8e7e1;margin-bottom:16px;flex-wrap:wrap">
+  {% set tabs = [
+    ('dashboard', 'Dashboard', 'ti-layout-dashboard'),
+    ('sip-profiles', 'SIP Profiles', 'ti-server'),
+    ('trunks', 'Trunks', 'ti-phone'),
+    ('routing', 'Routing', 'ti-route'),
+    ('rate-limit-pipes', 'Rate Limits', 'ti-gauge'),
+    ('security', 'Security', 'ti-shield-lock'),
+    ('settings', 'Settings', 'ti-settings'),
+    ('troubleshoot', 'Troubleshoot', 'ti-stethoscope'),
+    ('logs', 'Logs', 'ti-file-text'),
+    ('audit-log', 'Audit Log', 'ti-clipboard-list'),
+  ] %}
+  {% for key, label, icon in tabs %}
+  <a href="/nodes/{{ node.id }}/{{ key }}" style="padding:8px 14px;font-size:13px;text-decoration:none;border-bottom:2.5px solid {{ 'var(--brand-dark)' if active_tab == key else 'transparent' }};color:{{ 'var(--brand-dark)' if active_tab == key else '#5f5e5a' }};font-weight:{{ '600' if active_tab == key else '400' }}"><i class="ti {{ icon }}"></i> {{ label }}</a>
+  {% endfor %}
+</div>

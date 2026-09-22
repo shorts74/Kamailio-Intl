@@ -1,0 +1,53 @@
+{# Bridge configuration fields -- shared between routing_profile_form.html
+   (create) and routing_profile_detail.html (edit). `profile` is None/undefined
+   on create, a real row with existing values on edit. #}
+<div style="font-size:12px;color:var(--text-secondary);margin-bottom:14px">A Bridge plan always matches -- no prefix/pattern conditions -- so this single rule's destination and number handling apply to every call reaching this plan.</div>
+{% include "_destination_selector.html" with context %}
+<div style="display:flex;gap:24px;margin:14px 0">
+  <div style="display:flex;align-items:center;gap:8px"><input type="checkbox" name="bridge_trace_enabled" style="width:auto" {{ 'checked' if profile and profile.bridge_trace_enabled }}><label style="font-size:13px">Trace enabled</label></div>
+  <div style="display:flex;align-items:center;gap:8px"><input type="checkbox" name="bridge_record_enabled" style="width:auto" {{ 'checked' if profile and profile.bridge_record_enabled }}><label style="font-size:13px">Record enabled</label></div>
+</div>
+<div style="display:flex;gap:4px;margin:14px 0 12px;border-bottom:0.5px solid var(--border)">
+  <div class="bridge-tab active" data-target="bridge_called_fields" style="padding:6px 14px;font-size:13px;cursor:pointer;border-bottom:2px solid var(--border-accent)">Called number</div>
+  <div class="bridge-tab" data-target="bridge_calling_fields" style="padding:6px 14px;font-size:13px;cursor:pointer;color:var(--text-secondary)">Calling number</div>
+</div>
+{% for prefix, label in [("called", "Called"), ("calling", "Calling")] %}
+<div id="bridge_{{ prefix }}_fields" style="{{ '' if prefix == 'called' else 'display:none' }}">
+  <div class="fg" style="margin-bottom:10px"><label class="fl">1 &middot; Forced {{ label|lower }} number (absolute override -- skips everything below) {{ help_icon("Forced number", "If set, this exact value replaces the " + label|lower + " number, and NOTHING else in this pipeline runs for it -- not normalize, not strip, not prepend. Leave blank unless you specifically need an unconditional override.") }}</label><input name="bridge_forced_{{ prefix }}_number" value="{{ profile['bridge_forced_' + prefix + '_number'] or '' if profile else '' }}" placeholder="Leave blank unless overriding"></div>
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><input type="checkbox" name="bridge_{{ prefix }}_pre_normalize" style="width:auto" {{ 'checked' if profile and profile['bridge_' + prefix + '_pre_normalize'] }}><label style="font-size:13px">2 &middot; Pre-normalize (before strip/prepend/append)</label></div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:10px">
+    <div class="fg"><label class="fl">3 &middot; Strip digits (front)</label><input type="number" name="bridge_{{ prefix }}_strip_digits" value="{{ profile['bridge_' + prefix + '_strip_digits'] if profile and profile['bridge_' + prefix + '_strip_digits'] is not none else '' }}" placeholder="0"></div>
+    <div class="fg"><label class="fl">4 &middot; Strip last digits (end)</label><input type="number" name="bridge_{{ prefix }}_strip_last_digits" value="{{ profile['bridge_' + prefix + '_strip_last_digits'] if profile and profile['bridge_' + prefix + '_strip_last_digits'] is not none else '' }}" placeholder="0"></div>
+    <div class="fg"><label class="fl">5 &middot; Retain last N digits only</label><input type="number" name="bridge_{{ prefix }}_retain_last_digits" value="{{ profile['bridge_' + prefix + '_retain_last_digits'] if profile and profile['bridge_' + prefix + '_retain_last_digits'] is not none else '' }}" placeholder="blank = keep all"></div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+    <div class="fg"><label class="fl">6 &middot; Prepend</label><input name="bridge_{{ prefix }}_prepend_digits" value="{{ profile['bridge_' + prefix + '_prepend_digits'] or '' if profile else '' }}" placeholder="+44"></div>
+    <div class="fg"><label class="fl">7 &middot; Append suffix</label><input name="bridge_{{ prefix }}_append_suffix" value="{{ profile['bridge_' + prefix + '_append_suffix'] or '' if profile else '' }}" placeholder="none"></div>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><input type="checkbox" name="bridge_{{ prefix }}_post_normalize" style="width:auto" {{ 'checked' if profile and profile['bridge_' + prefix + '_post_normalize'] }}><label style="font-size:13px">8 &middot; Post-normalize (after strip/prepend/append)</label></div>
+  <div style="background:var(--surface-1);border-radius:var(--radius);padding:12px">
+    <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px">Normalize reference settings (used by pre- and/or post-normalize, if enabled above)</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+      <div class="fg"><label class="fl" style="font-size:11px">Home country code</label><input name="bridge_{{ prefix }}_home_country_code" value="{{ profile['bridge_' + prefix + '_home_country_code'] or '' if profile else '' }}" placeholder="44"></div>
+      <div class="fg"><label class="fl" style="font-size:11px">Home area code</label><input name="bridge_{{ prefix }}_home_area_code" value="{{ profile['bridge_' + prefix + '_home_area_code'] or '' if profile else '' }}"></div>
+      <div class="fg"><label class="fl" style="font-size:11px">National trunk prefix</label><input name="bridge_{{ prefix }}_national_trunk_prefix" value="{{ profile['bridge_' + prefix + '_national_trunk_prefix'] or '' if profile else '' }}" placeholder="0"></div>
+      <div class="fg"><label class="fl" style="font-size:11px">International prefix</label><input name="bridge_{{ prefix }}_international_prefix" value="{{ profile['bridge_' + prefix + '_international_prefix'] or '' if profile else '' }}" placeholder="00"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="fg"><label class="fl" style="font-size:11px">Target format</label><select name="bridge_{{ prefix }}_target_format">
+        {% set cur_fmt = profile['bridge_' + prefix + '_target_format'] if profile else None %}
+        <option value="e164_plus" {{ 'selected' if cur_fmt=='e164_plus' }}>E.164 with +</option>
+        <option value="e164_no_plus" {{ 'selected' if cur_fmt=='e164_no_plus' }}>E.164 without +</option>
+        <option value="national" {{ 'selected' if cur_fmt=='national' }}>National</option>
+        <option value="local" {{ 'selected' if cur_fmt=='local' }}>Local</option>
+      </select></div>
+      <div class="fg"><label class="fl" style="font-size:11px">+ handling</label><select name="bridge_{{ prefix }}_plus_mode">
+        {% set cur_plus = profile['bridge_' + prefix + '_plus_mode'] if profile else None %}
+        <option value="unchanged" {{ 'selected' if cur_plus=='unchanged' or not cur_plus }}>Unchanged</option>
+        <option value="add" {{ 'selected' if cur_plus=='add' }}>Add</option>
+        <option value="strip" {{ 'selected' if cur_plus=='strip' }}>Strip</option>
+      </select></div>
+    </div>
+  </div>
+</div>
+{% endfor %}

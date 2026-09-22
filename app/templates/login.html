@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in — {{ settings.company_name if settings else 'SIP Trunk Platform' }}</title>
+<style>
+:root{--brand-primary: {{ settings.primary_color if settings else '#4a2f52' }};--brand-dark: {{ settings.accent_dark if settings else '#1a1a1a' }};}
+*{box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f8f8f7;margin:0;height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#fff;border:0.5px solid #e8e7e1;border-radius:12px;padding:32px;width:340px}
+.logo{width:36px;height:36px;border-radius:8px;background:var(--brand-primary);display:flex;align-items:center;justify-content:center;margin:0 auto 16px}
+h1{font-size:17px;font-weight:500;text-align:center;margin:0 0 4px;color:var(--brand-dark)}
+p.sub{text-align:center;color:#888780;font-size:13px;margin:0 0 20px}
+.fg{margin-bottom:12px}
+label{font-size:12px;color:#5f5e5a;font-weight:500;display:block;margin-bottom:4px}
+input{width:100%;height:38px;padding:0 12px;border:0.5px solid #b4b2a9;border-radius:6px;font-size:14px}
+button{width:100%;height:40px;background:var(--brand-dark);color:#fff;border:none;border-radius:20px;font-size:14px;margin-top:8px;cursor:pointer}
+.err{background:#fcebeb;color:#a32d2d;padding:8px 12px;border-radius:6px;font-size:12px;margin-bottom:12px}
+.hint{text-align:center;font-size:11px;color:#888780;margin-top:16px}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo"></div>
+  <h1>{{ settings.company_name if settings else 'SIP Trunk Platform' }}</h1>
+  <p class="sub">Sign in to continue</p>
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  <form method="POST">
+    <div class="fg"><label>Username</label><input type="text" name="username" required autofocus></div>
+    <div class="fg"><label>Password</label><input type="password" name="password" required></div>
+    <div class="fg" style="display:flex;align-items:center;gap:6px;margin-bottom:16px">
+      <input type="checkbox" name="remember_me" id="remember_me" style="width:auto;height:auto">
+      <label for="remember_me" style="margin:0;font-weight:400;color:#5f5e5a">Remember me on this device</label>
+    </div>
+    <button type="submit">Sign in</button>
+  </form>
+  <p class="hint">Accepts local platform accounts or your Homer login</p>
+</div>
+</body>
+</html>

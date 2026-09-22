@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">Add routing plan</h1>
+<form method="POST">
+<div class="card"><div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Name</label><input name="name" value="{{ profile.name or '' if profile else '' }}" required></div>
+  <div class="fg"><label class="fl">Engine type {{ help_icon("Engine type", "Fixed for this plan's whole lifetime, chosen once here -- a plan commits to one engine and one rule syntax, never mixed. Prefix: matches on called-number prefixes (includes DIDs -- a full-length prefix is just an exact-match DID). Regex: matches on regular expression patterns instead. LCR: real-time cost-ordered carrier selection with live failover if the cheapest carrier is down. Subscriber lookup: fast number-to-user lookup at scale (bulk-imported numbers), for large subscriber bases where per-call SQL matching would be too slow. Bridge: a single, unconditional rule -- always matches, no prefix/pattern matching at all -- with a full number-manipulation/normalization pipeline, fully in-memory. Arithmetic: multi-condition rule chains comparing caller/called number or length. Blocklist: reject or divert calls matching entries on a reusable blocklist, checked against called and/or calling number. To combine prefix and regex rules the way a single plan used to, chain two plans together via Fallback plan below.") }}</label><select name="engine_type" required>
+    <option value="prefix">Prefix / DID</option>
+    <option value="regex">Regex</option>
+    <option value="lcr">LCR (least-cost routing)</option>
+    <option value="subscriber_lookup">Subscriber lookup</option>
+    <option value="bridge">Bridge (catch-all, in-memory)</option>
+    <option value="arithmetic">Arithmetic (condition rules)</option>
+    <option value="blocklist">Blocklist</option>
+  </select></div>
+  <div class="fg"><label class="fl">Fallback plan (optional)</label><select name="fallback_profile_id">
+    <option value="">None</option>{% for p in existing_profiles %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">Reject code {{ help_icon("Reject code", "The actual SIP response code sent when no route matches this plan's rules and there's no fallback plan to try next. 404 (Not Found) is the conventional choice, but some deployments prefer 480 (Temporarily Unavailable) or 603 (Declined) depending on policy -- must be a valid 3-digit SIP status code.") }}</label><input name="reject_code" value="404" maxlength="3" style="width:80px"></div>
+  <div class="fg"><label class="fl">Reject reason</label><input name="reject_reason" value="No Route Found"></div>
+  <div class="fg" style="grid-column:1/-1"><label class="fl">Description</label><input name="description" value="{{ profile.description or '' if profile else '' }}"></div>
+</div></div>
+<div class="card" id="lcr_warning" style="display:none"><div style="padding:12px;font-size:12px;color:#a15c00;background:#fff8ec">LCR's core carrier selection is built and confirmed working. Live failover (automatically trying the next carrier if the first one's call fails) is not yet verified -- fine to use, but keep an eye on it if you're relying on failover specifically.</div></div>
+
+<div class="card" id="blocklist_section" style="display:none"><div class="card-head"><span class="card-title">Blocklist configuration</span></div><div style="padding:16px">
+  {% include "_blocklist_fields.html" with context %}
+</div></div>
+
+<div class="card" id="bridge_section" style="display:none"><div class="card-head"><span class="card-title">Bridge configuration</span></div><div style="padding:16px">
+  {% include "_bridge_fields.html" with context %}
+</div></div>
+
+<script>
+document.querySelectorAll('.bridge-tab').forEach(function(tab) {
+  tab.addEventListener('click', function() {
+    document.querySelectorAll('.bridge-tab').forEach(function(t) {
+      t.classList.remove('active'); t.style.borderBottom = 'none'; t.style.color = 'var(--text-secondary)';
+    });
+    tab.classList.add('active'); tab.style.borderBottom = '2px solid var(--border-accent)'; tab.style.color = '';
+    document.getElementById('bridge_called_fields').style.display = tab.dataset.target === 'bridge_called_fields' ? '' : 'none';
+    document.getElementById('bridge_calling_fields').style.display = tab.dataset.target === 'bridge_calling_fields' ? '' : 'none';
+  });
+});
+function updateEngineSections() {
+  var val = document.querySelector('select[name="engine_type"]').value;
+  document.getElementById('lcr_warning').style.display = val === 'lcr' ? 'block' : 'none';
+  document.getElementById('blocklist_section').style.display = val === 'blocklist' ? 'block' : 'none';
+  document.getElementById('bridge_section').style.display = val === 'bridge' ? 'block' : 'none';
+}
+document.querySelector('select[name="engine_type"]').addEventListener('change', updateEngineSections);
+updateEngineSections();
+</script>
+{% if not existing_profiles %}<div class="card"><div style="padding:12px;font-size:12px;color:#888780">This will be this node's first routing plan, so it's automatically marked as the default.</div></div>{% endif %}
+<button type="submit" class="btn btn-primary"><i class="ti ti-check"></i> Create plan</button>
+<a href="/nodes/{{ node_id }}/routing" class="btn">Cancel</a>
+</form>
+{% endblock %}

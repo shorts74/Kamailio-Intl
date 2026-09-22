@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "_node_tabs.html" %}
+{% include "_pending_banner.html" %}
+<form method="POST">
+
+<div class="card"><div class="card-head"><span class="card-title">Elastic IP</span>
+  <a href="/nodes/{{ node.id }}/detect-eip" class="btn btn-sm"><i class="ti ti-radar"></i> Auto-detect</a></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Elastic IP {{ help_icon("Elastic IP", "This node's public-facing IP, used as the default SIP advertise address for any SIP Profile set to follow it. Changing this requires Apply & Restart to take effect -- calls use the stale address until then.") }}</label><input name="elastic_ip" value="{{ detected_eip or node.elastic_ip or '' }}"></div>
+</div>
+{% if detected_eip %}
+<div style="padding:0 16px 16px;font-size:12px;color:#1a1a1a;background:#fcf6e3;margin:0 16px 16px;border-radius:6px;padding:10px 12px">
+  <b>Detected {{ detected_eip }}</b> from the node itself -- pre-filled above, not saved yet. Review it, then click "Save settings" below to apply.
+</div>
+{% endif %}
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">
+  Used as the default SIP advertise address for any SIP Profile on this node set to "follow the node's Elastic IP" (see the profile's own settings).
+  Changing this <b>requires Apply & Restart</b> to take effect -- calls will use the stale address until you do.
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">RTP & Retention</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">RTP port min {{ help_icon("RTP port min", "Lower bound of the UDP port range rtpengine allocates for media streams on this node. Must stay within whatever range this node's firewall/security group actually allows through.") }}</label><input name="rtp_port_min" type="number" value="{{ node.rtp_port_min }}"></div>
+  <div class="fg"><label class="fl">RTP port max {{ help_icon("RTP port max", "Upper bound of the UDP port range rtpengine allocates for media streams on this node. A wider range supports more simultaneous calls -- each active stream holds its own port pair for its duration.") }}</label><input name="rtp_port_max" type="number" value="{{ node.rtp_port_max }}"></div>
+  <div class="fg"><label class="fl">Stats push interval (s) {{ help_icon("Stats push interval", "How often (in seconds) this node pushes its own health/stats snapshot to the Manager. Lower values give more current dashboard data at the cost of more frequent SSH polling.") }}</label><input name="stats_push_interval_sec" type="number" value="{{ node.stats_push_interval_sec }}"></div>
+  <div class="fg"><label class="fl">Stats retention (days) {{ help_icon("Stats retention", "How long historical health/stats snapshots are kept before being pruned. Older data beyond this window is deleted, not archived.") }}</label><input name="stats_retention_days" type="number" value="{{ node.stats_retention_days }}"></div>
+  <div class="fg"><label class="fl">Log file retention (days) {{ help_icon("Log file retention", "How many days of this node's own platform logs (sync-routing.log, push-stats.log) are kept before being rotated out, via a pushed logrotate config.") }}</label><input name="log_retention_days" type="number" value="{{ node.log_retention_days }}"></div>
+</div>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">These take effect live -- no restart needed. Log retention governs this node's sync-routing.log/push-stats.log (both write continuously via cron), applied via a pushed logrotate config. Homer trace retention is a Manager-wide setting (Settings page), not per-node.</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Dispatcher setid ranges</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Trunk range start {{ help_icon("Trunk range start", "First setid this node hands out to a new trunk. Each trunk gets its own unique setid from this range, recycled when a trunk is deleted.") }}</label><input name="trunk_setid_range_start" type="number" min="1" value="{{ node.trunk_setid_range_start }}"></div>
+  <div class="fg"><label class="fl">Trunk range end {{ help_icon("Trunk range end", "Last setid available for trunks -- widen this before it would otherwise run out. Must stay below where the Gateway group range starts.") }}</label><input name="trunk_setid_range_end" type="number" min="1" value="{{ node.trunk_setid_range_end }}"></div>
+  <div class="fg"><label class="fl">Gateway group range start {{ help_icon("Gateway group range start", "First setid this node hands out to a new gateway group. Must start after the trunk range ends -- the two ranges are not allowed to overlap.") }}</label><input name="gateway_group_setid_range_start" type="number" min="1" value="{{ node.gateway_group_setid_range_start }}"></div>
+  <div class="fg"><label class="fl">Gateway group range end {{ help_icon("Gateway group range end", "Last setid available for gateway groups -- widen this before it would otherwise run out.") }}</label><input name="gateway_group_setid_range_end" type="number" min="1" value="{{ node.gateway_group_setid_range_end }}"></div>
+</div>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">
+  This node's own ranges -- inherited from the platform-wide defaults (Settings page) when this node registered, independently adjustable here afterward. Widen these before they'd otherwise run out (each trunk/gateway group gets its own setid from the matching range, recycled on delete, so running out means every value in the range is currently in use). The gateway group range must start after the trunk range ends.
+</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Media/RTP Engine</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Media security (RTP inject/bleed) {{ help_icon("Media security", "Protects against RTP Inject and RTP Bleed attacks (CVE-2025-53399), where an attacker floods the open media port range to inject audio into a live call or redirect/eavesdrop its media. 'Heuristic (recommended)' applies strict-source checking with heuristic endpoint learning -- limits any inject/bleed to at most the first few packets while still handling callers behind NAT. 'No learning (strictest)' fully blocks the attack but can break some NAT'd endpoints. 'Off' disables the mitigation entirely and is NOT recommended -- for debugging only. Node-wide; takes effect on the next Apply & Restart.") }}</label><select name="rtpengine_media_security"><option value="heuristic" {{ 'selected' if node.rtpengine_media_security=='heuristic' }}>Heuristic (recommended)</option><option value="no_learning" {{ 'selected' if node.rtpengine_media_security=='no_learning' }}>No learning (strictest)</option><option value="off" {{ 'selected' if node.rtpengine_media_security=='off' }}>Off (not recommended)</option></select></div>
+  <div class="fg"><label class="fl">Silence detection threshold (%) {{ help_icon("Silence detection threshold", "Enables rtpengine's own active silence detection on transcoded audio streams, replacing detected silence with comfort noise. 0 disables it (default). Higher values detect more audio as silence; lower values detect less. Confirmed this only applies to streams actually being transcoded -- Transparent/Proxy (pure relay, no active decoding) never engages this regardless of the value here, since rtpengine never 'hears' the audio content in those modes.") }}</label><input name="rtpengine_silence_detect_pct" type="number" step="0.01" min="0" max="100" value="{{ node.rtpengine_silence_detect_pct }}"></div>
+  <div class="fg"><label class="fl">Comfort noise level (-dBov) {{ help_icon("Comfort noise level", "Noise level used for CN packets rtpengine generates from its own silence detection above (0 = loudest/maximum volume, 127 = near-silent). Only applies when silence detection is actually enabled.") }}</label><input name="rtpengine_cn_payload_level" type="number" min="0" max="127" value="{{ node.rtpengine_cn_payload_level }}"></div>
+  <div class="fg"><label class="fl">Jitter buffer size (packets) {{ help_icon("Jitter buffer size", "Size of rtpengine's own incoming jitter buffer, in packets. 0 disables it (default). Confirmed this only applies to userspace-forwarded media -- has no effect on calls using in-kernel packet forwarding.") }}</label><input name="rtpengine_jitter_buffer_pkts" type="number" min="0" value="{{ node.rtpengine_jitter_buffer_pkts }}"></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="rtpengine_jb_adaptive" style="width:auto" {{ 'checked' if node.rtpengine_jb_adaptive }}><label class="fl" style="margin:0">Adaptive jitter buffer sizing {{ help_icon("Adaptive jitter buffer sizing", "When enabled, the jitter buffer size is automatically calculated from measured network jitter (mean + 4 standard deviations) instead of using a fixed size, bounded by the min/max fields below.") }}</label></div>
+  <div class="fg"><label class="fl">Adaptive buffer min (ms) {{ help_icon("Adaptive buffer min", "Lower bound rtpengine's calculated adaptive jitter buffer size is clamped to, in milliseconds. Only applies when Adaptive jitter buffer sizing above is enabled.") }}</label><input name="rtpengine_jb_adaptive_min_ms" type="number" min="0" value="{{ node.rtpengine_jb_adaptive_min_ms }}"></div>
+  <div class="fg"><label class="fl">Adaptive buffer max (ms) {{ help_icon("Adaptive buffer max", "Upper bound rtpengine's calculated adaptive jitter buffer size is clamped to, in milliseconds. Only applies when Adaptive jitter buffer sizing above is enabled.") }}</label><input name="rtpengine_jb_adaptive_max_ms" type="number" min="0" max="1000" value="{{ node.rtpengine_jb_adaptive_max_ms }}"></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="rtpengine_jb_clock_drift" style="width:auto" {{ 'checked' if node.rtpengine_jb_clock_drift }}><label class="fl" style="margin:0">Clock drift compensation {{ help_icon("Clock drift compensation", "Lets rtpengine's jitter buffer correct for gradual clock drift between the two call legs, rather than just absorbing packet-arrival jitter alone.") }}</label></div>
+</div>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">These are rtpengine daemon-level settings -- confirmed genuinely node-wide, applying to every call this node's rtpengine handles, not per-trunk or per-Media-Profile. Unlike the fields above, these require an rtpengine restart to take effect (part of the next Apply & Restart), not live immediately.</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">System Rate Limit</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px">
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="rl_global_enabled" style="width:auto" {{ 'checked' if global_pipe }}><label class="fl" style="margin:0">Enabled {{ help_icon("Enabled", "Turns on this node's own overload-protection pipe, independent of any per-trunk/domain/user rate limits configured elsewhere.") }}</label></div>
+  <div class="fg"><label class="fl">Algorithm {{ help_icon("Algorithm", "FEEDBACK: throttles based on measured CPU/network load as a percentage (the Limit field below). TAILDROP: hard cap on requests per interval, drops anything over. RED: probabilistic early drop as load approaches the limit, smoother than TAILDROP's hard cutoff.") }}</label><select name="rl_global_algorithm">
+    <option value="FEEDBACK" {{ 'selected' if not global_pipe or global_pipe.algorithm=='FEEDBACK' }}>FEEDBACK (CPU/load-based)</option>
+    <option value="TAILDROP" {{ 'selected' if global_pipe and global_pipe.algorithm=='TAILDROP' }}>TAILDROP</option>
+    <option value="RED" {{ 'selected' if global_pipe and global_pipe.algorithm=='RED' }}>RED</option>
+  </select></div>
+  <div class="fg"><label class="fl">Limit {{ help_icon("Limit", "For FEEDBACK, a CPU/load percentage (e.g. 90). For TAILDROP/RED, a hard request-count threshold per interval.") }}</label><input name="rl_global_limit" type="number" value="{{ global_pipe.limit_value if global_pipe else 90 }}"></div>
+</div>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">System-wide overload protection -- FEEDBACK targets CPU/network load as a percentage (e.g. 90). This manages the same pipe shown on the node's Rate Limits tab; use that tab for per-trunk/domain/user limits.</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">HEP Traces</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Transport to Homer {{ help_icon("Transport to Homer", "How SIP trace packets are sent from this node to Homer. UDP is unencrypted, as this platform has always used. TLS encrypts the trace stream, but needs a nominated HEP certificate to verify Homer's identity against.") }}</label>
+    <select name="hep_transport">
+      <option value="udp" {{ 'selected' if node.hep_transport != 'tls' }}>UDP (plain, as before)</option>
+      <option value="tls" {{ 'selected' if node.hep_transport == 'tls' }}>TLS (encrypted)</option>
+    </select>
+  </div>
+</div>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">
+  {% if active_hep_cert_name %}
+  TLS mode verifies against the currently nominated HEP certificate: <b>{{ active_hep_cert_name }}</b> (see <a href="/certificates">Certificates</a>).
+  {% else %}
+  <span style="color:#a32d2d">No HEP certificate is nominated yet -- switching to TLS now would leave this node unable to verify Homer's identity. Nominate one from <a href="/certificates">Certificates</a> first.</span>
+  {% endif %}
+  Takes effect on this node's next Apply & Restart, not live.
+</div>
+</div>
+
+{% for category, params in categories.items() %}
+<div class="card"><div class="card-head"><span class="card-title">{{ category }}</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  {% for p in params %}
+  <div class="fg">
+    <label class="fl">{{ p.param_name }}{% if p.is_overridden %} <span class="badge badge-info" style="font-size:9px">overridden</span>{% endif %}</label>
+    {% if p.param_type == 'bool' %}
+      {% set bool_opts = ['on', 'off'] if p.default_value|lower in ['on', 'off'] else ['yes', 'no'] %}
+      <select name="param_{{ p.id }}">
+        {% for opt in bool_opts %}
+        <option value="{{ opt }}" {{ 'selected' if p.effective_value|lower == opt }}>{{ opt|capitalize }}{{ ' (default)' if opt == p.default_value|lower }}</option>
+        {% endfor %}
+      </select>
+    {% elif p.param_type == 'string' and p.allowed_values %}
+      {% set enum_opts = ([p.default_value] if p.default_value not in p.allowed_values.split(',') else []) + p.allowed_values.split(',') %}
+      <select name="param_{{ p.id }}">
+        {% for opt in enum_opts %}
+        <option value="{{ opt }}" {{ 'selected' if p.effective_value == opt }}>{{ opt if opt else '(none / node default)' }}{{ ' (default)' if opt == p.default_value }}</option>
+        {% endfor %}
+      </select>
+    {% elif p.param_type == 'int' %}
+      <input type="number" name="param_{{ p.id }}" value="{{ p.effective_value }}" placeholder="default: {{ p.default_value }}"
+        {% if p.min_value is not none %}min="{{ p.min_value }}"{% endif %}
+        {% if p.max_value is not none %}max="{{ p.max_value }}"{% endif %}>
+    {% else %}
+      <input name="param_{{ p.id }}" value="{{ p.effective_value }}" placeholder="default: {{ p.default_value }}">
+    {% endif %}
+    {% if p.description %}<span style="font-size:10px;color:#888780">{{ p.description }}</span>{% endif %}
+  </div>
+  {% endfor %}
+</div></div>
+{% endfor %}
+<div style="padding:0 0 16px;font-size:11px;color:#888780">Modparam changes require Apply & Restart (on the node's main page) to take effect -- they don't apply live.</div>
+
+<button type="submit" class="btn btn-primary"><i class="ti ti-check"></i> Save settings</button>
+<a href="/nodes/{{ node.id }}" class="btn">Back to node</a>
+</form>
+
+<div class="card"><div class="card-head"><span class="card-title"><i class="ti ti-key"></i> SSH Key Rotation</span></div>
+<div style="padding:16px">
+  <p style="font-size:12px;color:#888780;margin:0 0 10px">Current primary key (used for all automation to this node): <code class="mono">{{ node.ssh_key_path }}</code></p>
+  <p style="font-size:11px;color:#888780;margin:0 0 12px">Push a key from the registry, confirm it actually works with a real test connection, then make it primary -- the old key is never removed automatically, so nothing here can lock you out. Manage the registry itself from <a href="/certificates">Certificates</a>.</p>
+  {% if ssh_keys %}
+  <table><thead><tr><th>Key</th><th>Status on this node</th><th></th></tr></thead>
+  <tbody>{% for k in ssh_keys %}<tr>
+    <td><b>{{ k.name }}</b> <span class="badge badge-info">{{ k.source }}</span></td>
+    <td>
+      {% if k.confirmed_working %}<span class="badge badge-ok">Confirmed working</span> <span style="font-size:11px;color:#888780">as of {{ k.confirmed_at }}</span>
+      {% elif k.pushed_at %}<span class="badge badge-warn">Pushed, not yet tested</span>
+      {% else %}<span style="font-size:11px;color:#888780">Not pushed to this node</span>{% endif %}
+    </td>
+    <td>
+      {% if not k.pushed_at %}
+      <form method="POST" action="/nodes/{{ node.id }}/ssh-keys/{{ k.id }}/push" style="display:inline">
+        <button type="submit" class="btn btn-sm">Push to this node</button>
+      </form>
+      {% elif not k.confirmed_working %}
+        {% if k.private_key %}
+        <form method="POST" action="/nodes/{{ node.id }}/ssh-keys/{{ k.id }}/test" style="display:inline">
+          <button type="submit" class="btn btn-sm">Test connection</button>
+        </form>
+        {% else %}<span style="font-size:11px;color:#888780">No private key tracked -- can't test-connect</span>{% endif %}
+      {% else %}
+      <form method="POST" action="/nodes/{{ node.id }}/ssh-keys/{{ k.id }}/make-primary" style="display:inline">
+        <button type="submit" class="btn btn-sm btn-primary" onclick="return confirm('Switch this node\'s primary automation key to {{ k.name }}? The old key stays in authorized_keys, untouched.')">Make primary</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No SSH keys in the registry yet -- add one from <a href="/certificates">Certificates</a>.</div>{% endif %}
+</div></div>
+{% endblock %}

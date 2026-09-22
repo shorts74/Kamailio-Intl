@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<div style="margin-bottom:12px"><a href="/nodes/{{ node.id }}/trunks" class="btn btn-sm"><i class="ti ti-arrow-left"></i> Back to Trunks</a></div>
+<h1 style="font-size:18px;font-weight:500;margin:0 0 4px">Troubleshoot: {{ trunk.name }}</h1>
+<p style="font-size:12px;color:#888780;margin:0 0 16px">{{ trunk.ip_addr }}:{{ trunk.port }} ({{ trunk.transport|upper }}) on {{ node.name }}</p>
+
+<div class="card"><div style="padding:16px">
+{% for step in steps %}
+<div style="display:flex;gap:12px;padding:12px 0;{{ 'border-bottom:1px solid #eee' if not loop.last }}">
+  <div style="flex-shrink:0;width:24px;text-align:center;font-size:16px">
+    {% if step.status == 'ok' %}<span style="color:#2d7a3a">✓</span>
+    {% elif step.status == 'warn' %}<span style="color:#b8860b">!</span>
+    {% elif step.status == 'fail' %}<span style="color:#a32d2d">✗</span>
+    {% else %}<span style="color:#888780">–</span>{% endif %}
+  </div>
+  <div style="flex:1">
+    <div style="font-weight:600;font-size:13px">{{ step.title }}</div>
+    <div style="font-size:12px;color:{{ '#a32d2d' if step.status == 'fail' else '#5f5e5a' }};margin-top:2px">{{ step.message }}</div>
+    {% if step.detail %}
+    <pre style="margin-top:8px;padding:10px;background:#1e1e1e;color:#d4d4d4;font-size:11px;border-radius:4px;white-space:pre-wrap;word-break:break-all;max-height:200px;overflow-y:auto">{{ step.detail }}</pre>
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+</div></div>
+
+<div style="margin-top:12px"><a href="/trunks/{{ trunk.id }}/troubleshoot" class="btn btn-sm"><i class="ti ti-refresh"></i> Re-run</a></div>
+{% endblock %}

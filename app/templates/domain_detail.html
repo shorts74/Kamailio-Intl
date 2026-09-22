@@ -1,0 +1,377 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+<div style="margin-bottom:12px"><a href="/domains" class="btn btn-sm"><i class="ti ti-arrow-left"></i> Back to Domains</a></div>
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">{{ domain.friendly_name }}
+  <span style="font-size:13px;color:#888780;font-weight:400"> -- {{ domain.name }}</span>
+  <span class="badge badge-{{ 'info' if domain.domain_type=='local' else 'warn' }}">{{ domain.domain_type }}</span></h1>
+
+{% if domain.domain_type == 'proxy' %}
+<div class="card"><div class="card-head"><span class="card-title">Proxy routing</span></div>
+<div style="padding:16px">
+  Primary: {% if primary_trunk %}<b>{{ primary_trunk.name }}</b>{% else %}<span style="color:#a32d2d">none set</span>{% endif %}
+  &nbsp;&nbsp; Secondary: {% if secondary_trunk %}<b>{{ secondary_trunk.name }}</b>{% else %}-{% endif %}
+  <p style="font-size:12px;color:#888780;margin-top:8px">Inbound calls for this domain's DIDs route to the primary trunk,
+  failing over to the secondary if the primary is down. No users -- individual extensions register directly
+  to the upstream PBX, not to this platform.</p>
+</div></div>
+{% else %}
+<div class="card"><div class="card-head"><span class="card-title"><i class="ti ti-users"></i> Users</span>
+  <button type="button" class="btn btn-sm btn-primary" onclick="document.getElementById('add-user-form').style.display='flex'"><i class="ti ti-plus"></i> Add User</button></div>
+<div data-live-region="users_q">
+<form id="add-user-form" method="POST" action="/domains/{{ domain.id }}/subscribers/new" style="padding:16px;display:none;gap:8px;align-items:end;flex-wrap:wrap;border-bottom:1px dashed #ddd">
+  <div class="fg" style="margin:0"><label class="fl">Username</label><input name="username" required></div>
+  <div class="fg" style="margin:0"><label class="fl">Password</label><input name="password" required></div>
+  <div class="fg" style="margin:0"><label class="fl">Ring policy {{ help_icon("Ring policy", "\"All\": every registered device for this user rings simultaneously on an incoming call. \"Latest\": only the most recently registered device rings.") }}</label><select name="ring_policy">
+    <option value="">Domain default</option><option value="all">All</option><option value="latest">Latest</option>
+  </select></div>
+  <div class="fg" style="margin:0"><label class="fl">Max registrations {{ help_icon("Max registrations", "Caps how many devices this user can have registered at once. Leave blank to use the domain-wide default.") }}</label><input name="max_registrations" type="number" min="1" placeholder="domain default"></div>
+  <button type="submit" class="btn btn-sm btn-primary"><i class="ti ti-plus"></i> Add User</button>
+</form>
+<div style="padding:12px 16px 0">
+{% call toolbar(page=users_page, total_pages=users_total_pages, total=users_total, export_url="/domains/" ~ domain.id ~ "/users/export.csv", import_url="/domains/" ~ domain.id ~ "/users/import", page_param="users_page", q_param="users_q") %}
+  <div class="fg" style="margin:0"><label class="fl">Search</label><input name="users_q" value="{{ request.args.get('users_q', '') }}" placeholder="username or name..." data-live-search data-page-param="users_page"></div>
+{% endcall %}
+</div>
+<table><thead><tr><th>Name</th><th>Username</th><th>Status</th><th>Numbers</th><th>Forwarding</th><th></th></tr></thead>
+<tbody>{% for s in subscribers %}<tr>
+  <td>{{ s.friendly_name or s.username }}</td>
+  <td class="mono">{{ s.username }}</td>
+  <td>{% if s.enabled %}<span class="badge badge-ok">Enabled</span>{% else %}<span class="badge badge-bad">Disabled</span>{% endif %}</td>
+  <td>{{ s.numbers_count }}</td>
+  <td>{% if s.has_forwarding %}<span class="badge badge-info">Active</span>{% else %}<span style="color:#888780">-</span>{% endif %}</td>
+  <td><a href="/subscribers/{{ s.id }}/manage" class="btn btn-sm">Manage</a></td>
+</tr>{% endfor %}</tbody></table>
+{% if not subscribers %}<div class="empty">No users yet -- click "Add User" above.</div>{% endif %}
+</div>
+</div>
+{% endif %}
+
+<form method="POST" action="/domains/{{ domain.id }}">
+
+<div class="card"><div class="card-head"><span class="card-title">Settings</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Domain</label><input name="name" placeholder="sales.acmecorp.com" value="{{ domain.name or '' }}" required></div>
+  <div class="fg"><label class="fl">Name {{ help_icon("Name", "Admin-set friendly label for this domain, shown throughout the UI instead of the raw domain string. Optional -- defaults to the domain itself if left blank.") }}</label><input name="friendly_name" placeholder="e.g. Acme Corp HQ" value="{{ domain.friendly_name or '' }}"></div>
+  <div class="fg"><label class="fl">When username not found {{ help_icon("When username not found", "This fires when the domain itself is fine (bound to a SIP Profile, recognized) but the specific username being registered doesn't exist as a subscriber here. Distinct from the SIP Profile's own \"domain not bound\"/\"domain not found\" settings -- those fire earlier, before this is ever reached.") }}</label><select name="reject_reason_action" onchange="document.getElementById('domain-reject-reason-fields').style.display = this.value === 'reject' ? 'flex' : 'none'">
+    <option value="reject" {{ 'selected' if (domain.reject_reason_action or 'reject')=='reject' }}>Reject</option>
+    <option value="drop" {{ 'selected' if domain.reject_reason_action=='drop' }}>Drop Silently</option>
+  </select></div>
+  <div id="domain-reject-reason-fields" style="display:{{ 'flex' if domain.reject_reason_action != 'drop' else 'none' }};gap:12px;grid-column:1/-1">
+    <div class="fg" style="flex:1"><label class="fl">Reason code</label><input name="reject_reason_code" type="number" min="300" max="699" value="{{ domain.reject_reason_code or 404 }}"></div>
+    <div class="fg" style="flex:2"><label class="fl">Reason text</label><input name="reject_reason_text" value="{{ domain.reject_reason_text or 'User not found' }}"></div>
+  </div>
+  <div class="fg" style="grid-column:1/-1"><label class="fl">Description</label><input name="description" value="{{ domain.description or '' }}"></div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Registration behavior</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Ring policy (default for this domain's users)</label><select name="ring_policy">
+    <option value="all" {{ 'selected' if domain.ring_policy=='all' }}>Ring all registered contacts</option>
+    <option value="latest" {{ 'selected' if domain.ring_policy=='latest' }}>Ring most recent registration only</option>
+  </select></div>
+  <div class="fg"><label class="fl">Max registrations (default per user)</label><input name="max_registrations" type="number" min="1" value="{{ domain.max_registrations or 1 }}"></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="outbound_auth_required" style="width:auto" {{ 'checked' if domain.outbound_auth_required is not defined or domain.outbound_auth_required }}><label class="fl">Challenge outbound calls from this domain's users</label></div>
+  <div class="fg" style="grid-column:1/-1;margin:-4px 0 0;font-size:11px;color:#888780">Per-user overrides (set on the user's own edit form) take precedence over these domain defaults for ring policy and max registrations.</div>
+  <div class="fg"><label class="fl">Unreachable-user code</label><input name="user_unreachable_code" type="number" value="{{ domain.user_unreachable_code or 480 }}"></div>
+  <div class="fg"><label class="fl">Unreachable-user reason text</label><input name="user_unreachable_text" value="{{ domain.user_unreachable_text or 'Temporarily Unavailable' }}"></div>
+  <div class="fg" style="grid-column:1/-1;margin:-4px 0 0;font-size:11px;color:#888780">Used when a routing rule targets one of this domain's users and they currently have zero active registrations.</div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Call Forwarding</span></div>
+<div style="padding:0 16px;font-size:11px;color:#888780;padding-top:12px">Each switch independently gates whether that same type's per-subscriber setting is ever checked at all -- off by default. A subscriber can't use a forwarding type until it's enabled here, domain-wide, first.</div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="unconditional_forwarding_enabled" style="width:auto" {{ 'checked' if domain.unconditional_forwarding_enabled }}><label class="fl" style="margin:0">Allow unconditional forwarding</label></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="busy_forwarding_enabled" style="width:auto" {{ 'checked' if domain.busy_forwarding_enabled }}><label class="fl" style="margin:0">Allow busy forwarding</label></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="no_answer_forwarding_enabled" style="width:auto" {{ 'checked' if domain.no_answer_forwarding_enabled }}><label class="fl" style="margin:0">Allow no-answer forwarding {{ help_icon("Allow no-answer forwarding", "Also controls whether the ring-timeout mechanism (needed to detect \"no answer\" at all) gets set up for calls into this domain -- leaving this off avoids that overhead entirely for domains that never use it. Known limitation: not reliably honored for TCP-registered contacts in all Kamailio versions -- may not fire correctly for a TCP-registered subscriber even with this on.") }}</label></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="unavailable_forwarding_enabled" style="width:auto" {{ 'checked' if domain.unavailable_forwarding_enabled }}><label class="fl" style="margin:0">Allow unavailable forwarding</label></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="diversion_header_enabled" style="width:auto" {{ 'checked' if domain.diversion_header_enabled is not defined or domain.diversion_header_enabled }}><label class="fl" style="margin:0">Add Diversion header (RFC 5806) on forwarded calls {{ help_icon("Diversion header", "Whenever any forwarding type above actually fires on a real call, adds a Diversion header to the forwarded INVITE identifying which user diverted the call and why (unconditional / user-busy / no-answer / unavailable). On by default (matches this platform's previous always-on behavior). Individual users under this domain can override this default from their own page.") }}</label></div>
+</div>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">Configure each user's actual forwarding target on their own page (Numbers/Forwarding link, from this domain's user list).</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Caller ID Settings &mdash; Inbound</span></div>
+<div style="padding:16px 16px 0;font-size:11px;color:#888780">
+  Domain-wide default for calls <b>originating from</b> a user in this domain -- decides which number is actually used as their caller ID. Any subscriber under this domain inherits these unless they have their own override set on their own user page.
+</div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div style="grid-column:1/-1;font-size:11px;font-weight:600;color:#5f5e5a;text-transform:uppercase;letter-spacing:.03em;margin-top:4px">Caller</div>
+  <div class="fg"><label class="fl">Caller ID mode {{ help_icon("Caller ID mode", "What a user in this domain is allowed to present as caller ID by default. \"Allow any\": passes through unmodified. \"Allow DIDs only\": must be one of the user's own assigned DIDs or it's rewritten to their default. \"Force custom\": always rewritten to the Custom number field. \"Force specific number\": always rewritten to the Forced number field. \"Force per number\": for a user with multiple DIDs, each is enforced to map to itself.") }}</label>
+    <select name="inbound_callerid_mode">
+      <option value="allow_any" {{ 'selected' if domain.inbound_callerid_mode=='allow_any' }}>Allow any</option>
+      <option value="allow_dids_only" {{ 'selected' if domain.inbound_callerid_mode=='allow_dids_only' }}>Allow DIDs only</option>
+      <option value="force_custom" {{ 'selected' if domain.inbound_callerid_mode=='force_custom' }}>Force custom number</option>
+      <option value="force_specific_number" {{ 'selected' if domain.inbound_callerid_mode=='force_specific_number' }}>Force specific number</option>
+      <option value="force_per_number" {{ 'selected' if domain.inbound_callerid_mode=='force_per_number' }}>Force per number</option>
+    </select>
+  </div>
+  <div class="fg"><label class="fl">Caller ID name {{ help_icon("Caller ID name", "Default display name for users in this domain, e.g. \"Acme Corp\". Left blank means no display name is sent -- an empty string is never sent as a literal blank name.") }}</label><input name="inbound_callerid_name" value="{{ domain.inbound_callerid_name or '' }}" placeholder="Optional"></div>
+  <div class="fg"><label class="fl">Custom number {{ help_icon("Custom number", "Used only when Caller ID mode above is \"Force custom number\".") }}</label><input name="inbound_callerid_custom_number" value="{{ domain.inbound_callerid_custom_number or '' }}" placeholder="e.g. +15551234567"></div>
+  <div class="fg"><label class="fl">Forced number {{ help_icon("Forced number", "Used only when Caller ID mode above is \"Force specific number\".") }}</label><input name="inbound_callerid_forced_number" value="{{ domain.inbound_callerid_forced_number or '' }}" placeholder="e.g. +15551234567"></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="inbound_use_pai_rpid_incoming" style="width:auto" {{ 'checked' if domain.inbound_use_pai_rpid_incoming }}><label class="fl">Prefer P-Asserted-Identity/Remote-Party-ID {{ help_icon("Prefer PAI/RPID", "When reading a call's identity, prefer a P-Asserted-Identity or Remote-Party-ID header over the plain From header, if present.") }}</label></div>
+  <div style="grid-column:1/-1;font-size:11px;font-weight:600;color:#5f5e5a;text-transform:uppercase;letter-spacing:.03em;margin-top:8px;border-top:0.5px solid #e8e7e1;padding-top:12px">Called</div>
+  <div class="fg"><label class="fl">Called number source {{ help_icon("Called number source", "Which part of an incoming call actually carries the dialed number. \"Request-URI\" (default, standard). \"To header\"/\"RPID\": rare, only if this domain's traffic source specifically requires it.") }}</label>
+    <select name="inbound_called_number_source">
+      <option value="request_uri" {{ 'selected' if domain.inbound_called_number_source=='request_uri' }}>Request-URI</option>
+      <option value="to_header" {{ 'selected' if domain.inbound_called_number_source=='to_header' }}>To header</option>
+      <option value="rpid" {{ 'selected' if domain.inbound_called_number_source=='rpid' }}>Remote-Party-ID</option>
+    </select>
+  </div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Caller ID Settings &mdash; Outbound</span></div>
+<div style="padding:16px 16px 0;font-size:11px;color:#888780">
+  This domain's own requirement for calls <b>routed TO</b> its users (e.g. an inbound call to their DID) -- controls presentation and can further enforce the number, applied after routing and able to override whatever the originating side already decided.
+</div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div style="grid-column:1/-1;font-size:11px;font-weight:600;color:#5f5e5a;text-transform:uppercase;letter-spacing:.03em;margin-top:4px">Caller</div>
+  <div class="fg"><label class="fl">Caller ID mode {{ help_icon("Caller ID mode (outbound)", "This domain's own requirement for calls delivered TO its users -- applied after routing, can override whatever the originating side already decided.") }}</label>
+    <select name="outbound_callerid_mode">
+      <option value="allow_any" {{ 'selected' if domain.outbound_callerid_mode=='allow_any' }}>Allow any</option>
+      <option value="allow_dids_only" {{ 'selected' if domain.outbound_callerid_mode=='allow_dids_only' }}>Allow DIDs only</option>
+      <option value="force_custom" {{ 'selected' if domain.outbound_callerid_mode=='force_custom' }}>Force custom number</option>
+      <option value="force_specific_number" {{ 'selected' if domain.outbound_callerid_mode=='force_specific_number' }}>Force specific number</option>
+      <option value="force_per_number" {{ 'selected' if domain.outbound_callerid_mode=='force_per_number' }}>Force per number</option>
+    </select>
+  </div>
+  <div class="fg"><label class="fl">Custom number {{ help_icon("Custom number (outbound)", "Used only when Caller ID mode above is \"Force custom number\".") }}</label><input name="outbound_callerid_custom_number" value="{{ domain.outbound_callerid_custom_number or '' }}" placeholder="e.g. +15551234567"></div>
+  <div class="fg"><label class="fl">Forced number {{ help_icon("Forced number (outbound)", "Used only when Caller ID mode above is \"Force specific number\".") }}</label><input name="outbound_callerid_forced_number" value="{{ domain.outbound_callerid_forced_number or '' }}" placeholder="e.g. +15551234567"></div>
+  <div class="fg"><label class="fl">Presentation method {{ help_icon("Presentation method", "How the final caller ID is written when delivered to this domain's users. \"From header\" (default, standard). \"P-Asserted-Identity\"/\"Remote-Party-ID\": for softphones that specifically read those instead.") }}</label>
+    <select name="outbound_callerid_method">
+      <option value="from_header" {{ 'selected' if domain.outbound_callerid_method=='from_header' }}>From header</option>
+      <option value="pai" {{ 'selected' if domain.outbound_callerid_method=='pai' }}>P-Asserted-Identity</option>
+      <option value="rpid" {{ 'selected' if domain.outbound_callerid_method=='rpid' }}>Remote-Party-ID</option>
+    </select>
+  </div>
+  <div class="fg"><label class="fl">Number URI format {{ help_icon("Number URI format", "How a phone-number-shaped identifier is formatted. \"SIP URI\" (default). \"SIP URI with user=phone\": some softphones expect this to recognize a real telephone number. \"tel: URI\": rare, only if this domain's devices specifically require it. Applies to the caller-ID identity -- independent of the R-URI scheme, which applies to the R-URI itself (see Request-URI / To header construction below).") }}</label>
+    <select name="outbound_number_uri_format">
+      <option value="sip_uri" {{ 'selected' if domain.outbound_number_uri_format=='sip_uri' }}>SIP URI</option>
+      <option value="sip_uri_user_phone" {{ 'selected' if domain.outbound_number_uri_format=='sip_uri_user_phone' }}>SIP URI with user=phone</option>
+      <option value="tel_uri" {{ 'selected' if domain.outbound_number_uri_format=='tel_uri' }}>tel: URI</option>
+    </select>
+  </div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="outbound_use_local_address_from" style="width:auto" {{ 'checked' if domain.outbound_use_local_address_from }}><label class="fl">Use local address in From {{ help_icon("Use local address in From", "Replace the domain part of the outgoing From header with this node's own local/advertised address.") }}</label></div>
+  <div style="grid-column:1/-1;font-size:11px;font-weight:600;color:#5f5e5a;text-transform:uppercase;letter-spacing:.03em;margin-top:8px;border-top:0.5px solid #e8e7e1;padding-top:12px">Called</div>
+  <div class="fg"><label class="fl">Called number placement {{ help_icon("Called number placement", "Where the dialed number is written when delivered to this domain's users. \"Request-URI\" (default, standard).") }}</label>
+    <select name="outbound_called_number_placement">
+      <option value="request_uri" {{ 'selected' if domain.outbound_called_number_placement=='request_uri' }}>Request-URI</option>
+      <option value="to_header" {{ 'selected' if domain.outbound_called_number_placement=='to_header' }}>To header</option>
+      <option value="rpid" {{ 'selected' if domain.outbound_called_number_placement=='rpid' }}>Remote-Party-ID</option>
+    </select>
+  </div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Request-URI / To header construction {{ help_icon("Request-URI / To construction", "What actually gets sent as the address of this call, independent of caller ID above.") }}</span></div>
+<div style="padding:0 16px;font-size:11px;color:#888780;padding-top:12px">To defaults to matching the R-URI exactly -- only a minority of destinations need the two built differently.</div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div class="fg"><label class="fl">R-URI user {{ help_icon("R-URI user", "\"Dialed number\" (default): the actual extension/number being called. \"Registered identity\": the subscriber's own registered AOR username, if they're currently registered -- rare, only relevant for specific softphone requirements.") }}</label>
+    <select name="outbound_ruri_user_source">
+      <option value="dialed_number" {{ 'selected' if domain.outbound_ruri_user_source=='dialed_number' }}>Dialed number</option>
+      <option value="registered_identity" {{ 'selected' if domain.outbound_ruri_user_source=='registered_identity' }}>Registered identity</option>
+    </select>
+  </div>
+  <div class="fg"><label class="fl">R-URI domain {{ help_icon("R-URI domain", "\"This node's address\" (default, today's existing behavior). \"Domain name\": this domain's own configured SIP domain name instead -- relevant for multi-tenant setups where a domain has its own distinct identity.") }}</label>
+    <select name="outbound_ruri_domain_source">
+      <option value="node_address" {{ 'selected' if domain.outbound_ruri_domain_source=='node_address' }}>This node's address</option>
+      <option value="domain_name" {{ 'selected' if domain.outbound_ruri_domain_source=='domain_name' }}>Domain name</option>
+    </select>
+  </div>
+  <div class="fg"><label class="fl">R-URI scheme {{ help_icon("R-URI scheme", "Independent of Number URI format above, which only applies to the caller-ID identity. Applied to the R-URI itself.") }}</label>
+    <select name="outbound_ruri_uri_format">
+      <option value="sip_uri" {{ 'selected' if domain.outbound_ruri_uri_format=='sip_uri' }}>SIP URI</option>
+      <option value="sip_uri_user_phone" {{ 'selected' if domain.outbound_ruri_uri_format=='sip_uri_user_phone' }}>SIP URI with user=phone</option>
+      <option value="tel_uri" {{ 'selected' if domain.outbound_ruri_uri_format=='tel_uri' }}>tel: URI</option>
+    </select>
+  </div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px;grid-column:1/-1"><input type="checkbox" name="outbound_to_same_as_ruri" id="dom_to_same_as_ruri" style="width:auto" {{ 'checked' if domain.outbound_to_same_as_ruri is not defined or domain.outbound_to_same_as_ruri }} onchange="toggleDomToFields()"><label class="fl">To header matches R-URI exactly</label></div>
+  <div id="dom_to_fields_group" style="display:{{ 'grid' if domain and not domain.outbound_to_same_as_ruri else 'none' }};grid-column:1/-1;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+    <div class="fg"><label class="fl">To user</label>
+      <select name="outbound_to_user_source">
+        <option value="dialed_number" {{ 'selected' if domain.outbound_to_user_source=='dialed_number' }}>Dialed number</option>
+        <option value="registered_identity" {{ 'selected' if domain.outbound_to_user_source=='registered_identity' }}>Registered identity</option>
+      </select>
+    </div>
+    <div class="fg"><label class="fl">To domain</label>
+      <select name="outbound_to_domain_source">
+        <option value="node_address" {{ 'selected' if domain.outbound_to_domain_source=='node_address' }}>This node's address</option>
+        <option value="domain_name" {{ 'selected' if domain.outbound_to_domain_source=='domain_name' }}>Domain name</option>
+      </select>
+    </div>
+    <div class="fg"><label class="fl">To scheme</label>
+      <select name="outbound_to_uri_format">
+        <option value="sip_uri" {{ 'selected' if domain.outbound_to_uri_format=='sip_uri' }}>SIP URI</option>
+        <option value="sip_uri_user_phone" {{ 'selected' if domain.outbound_to_uri_format=='sip_uri_user_phone' }}>SIP URI with user=phone</option>
+        <option value="tel_uri" {{ 'selected' if domain.outbound_to_uri_format=='tel_uri' }}>tel: URI</option>
+      </select>
+    </div>
+  </div>
+  <script>
+  function toggleDomToFields() {
+    var same = document.getElementById('dom_to_same_as_ruri').checked;
+    document.getElementById('dom_to_fields_group').style.display = same ? 'none' : 'grid';
+  }
+  document.addEventListener('DOMContentLoaded', toggleDomToFields);
+  </script>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Privacy</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Privacy mode {{ help_icon("Privacy mode", "Final layer, can override the presentation method above when they'd conflict. \"None\" (default). \"Privacy: id\": From anonymized, but real identity still travels in P-Asserted-Identity for a trusted next hop. \"Full\": From anonymized, PAI suppressed entirely -- no real identity leaves the platform at all.") }}</label>
+    <select name="outbound_privacy_mode">
+      <option value="none" {{ 'selected' if domain.outbound_privacy_mode=='none' }}>None</option>
+      <option value="id" {{ 'selected' if domain.outbound_privacy_mode=='id' }}>Privacy: id (hide from user, not network)</option>
+      <option value="full" {{ 'selected' if domain.outbound_privacy_mode=='full' }}>Full (hide from everyone)</option>
+    </select>
+  </div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Topology Hiding</span></div>
+<div style="padding:16px 16px 0;font-size:11px;color:#888780">
+  Domain-wide default for whether Kamailio masks its own internal network addresses in traffic to/from this domain's users. Leaving either as "Inherit" follows the SIP Profile default (usually enabled).
+</div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Inbound (traffic from this domain's users) {{ help_icon("Topology hiding, inbound", "Whether our topology is masked in traffic relayed onward that originated from a user in this domain.") }}</label>
+    <select name="topoh_mask_inbound">
+      <option value="" {{ 'selected' if domain.topoh_mask_inbound is none }}>Inherit from SIP Profile</option>
+      <option value="1" {{ 'selected' if domain.topoh_mask_inbound == true }}>Enabled</option>
+      <option value="0" {{ 'selected' if domain.topoh_mask_inbound == false }}>Disabled</option>
+    </select>
+  </div>
+  <div class="fg"><label class="fl">Outbound (traffic to this domain's users) {{ help_icon("Topology hiding, outbound", "Whether our topology is masked in traffic being delivered to a user in this domain.") }}</label>
+    <select name="topoh_mask_outbound">
+      <option value="" {{ 'selected' if domain.topoh_mask_outbound is none }}>Inherit from SIP Profile</option>
+      <option value="1" {{ 'selected' if domain.topoh_mask_outbound == true }}>Enabled</option>
+      <option value="0" {{ 'selected' if domain.topoh_mask_outbound == false }}>Disabled</option>
+    </select>
+  </div>
+</div></div>
+
+<button type="submit" class="btn btn-primary"><i class="ti ti-check"></i> Save changes</button>
+<a href="/domains" class="btn">Cancel</a>
+{% if sip_profile_count == 0 %}
+<a href="/domains/{{ domain.id }}/delete" class="btn btn-danger" style="float:right"
+   onclick="return confirm('Delete domain \'{{ domain.name }}\'?{% if subscriber_count %} This domain has {{ subscriber_count }} user{{ 's' if subscriber_count != 1 }}, which will ALSO be deleted.{% endif %} This cannot be undone.')">
+  <i class="ti ti-trash"></i> Delete domain
+</a>
+{% else %}
+<span class="btn" style="float:right;opacity:0.4;cursor:not-allowed" title="Still bound to {{ sip_profile_count }} SIP Profile(s) -- disable those bindings below first">
+  <i class="ti ti-trash"></i> Delete domain
+</span>
+{% endif %}
+</form>
+
+<div class="card" style="margin-top:20px"><div class="card-head"><span class="card-title">Access control</span></div>
+<div style="padding:0 16px;font-size:11px;color:#888780;padding-top:12px">No Access Control Lists attached = allow registration/calls from any source IP. <a href="/acls/new">Manage Access Control Lists</a>.</div>
+{% set attached_acls = acls|selectattr('id', 'in', tagged_acl_ids)|list %}
+{% if attached_acls %}
+<table><thead><tr><th>Access Control List</th><th></th></tr></thead>
+<tbody>{% for a in attached_acls %}<tr>
+  <td>{{ a.name }}</td>
+  <td><form method="POST" action="/domains/{{ domain.id }}/acls/{{ a.id }}/delete" style="display:inline"><button type="submit" class="btn btn-sm">Remove</button></form></td>
+</tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty">No Access Control Lists attached.</div>{% endif %}
+{% set unattached_acls = acls|rejectattr('id', 'in', tagged_acl_ids)|list %}
+{% if unattached_acls %}
+<div style="padding:16px;border-top:0.5px solid #e8e7e1">
+  <form method="POST" action="/domains/{{ domain.id }}/acls/add" style="display:flex;gap:8px;align-items:end">
+    <div class="fg" style="margin:0"><label class="fl">Attach an Access Control List</label>
+      <select name="acl_id"><option value="">Select one...</option>{% for a in unattached_acls %}<option value="{{ a.id }}">{{ a.name }}</option>{% endfor %}</select>
+    </div>
+    <button type="submit" class="btn btn-sm btn-primary">Add</button>
+  </form>
+</div>
+{% endif %}
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Custom headers to add {{ help_icon("Custom headers to add", "Applied to every outbound INVITE delivered to this domain's users, up to 10. Each is a full header line -- \"Name: value\". The value may reference variables like ${called_number}, resolved per-call.") }}</span></div>
+{% if domain_custom_headers %}
+<table><thead><tr><th>Header</th><th>Added</th><th></th></tr></thead>
+<tbody>{% for h in domain_custom_headers %}<tr>
+  <td class="mono">{{ h.header_line }}</td>
+  <td style="font-size:11px;color:#888780">{{ h.created_at }}</td>
+  <td><form method="POST" action="/domains/{{ domain.id }}/custom-headers/{{ h.id }}/delete" style="display:inline" onsubmit="return confirm('Remove this header?')"><button type="submit" class="btn btn-sm">Remove</button></form></td>
+</tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty">No custom headers added yet.</div>{% endif %}
+<div style="padding:16px;border-top:0.5px solid #e8e7e1">
+  <form method="POST" action="/domains/{{ domain.id }}/custom-headers/add" style="display:flex;gap:8px;align-items:end">
+    <div class="fg" style="margin:0;flex:1"><label class="fl">Add a header (up to 10)</label><input name="header_line" id="dom_hdr_line_input" placeholder="X-Original-Called: ${original_called}" style="width:100%" required></div>
+    <div class="fg" style="margin:0"><label class="fl">Insert variable</label>
+      <select onchange="if(this.value){var el=document.getElementById('dom_hdr_line_input');var start=el.selectionStart||el.value.length;el.value=el.value.slice(0,start)+this.value+el.value.slice(start);el.focus();this.selectedIndex=0;}">
+        <option value="">Choose...</option>
+        {% for category, vars in variable_catalog.items() %}
+        <optgroup label="{{ category }}">
+          {% for v in vars %}<option value="${{ '{' }}{{ v.placeholder_name }}{{ '}' }}" title="{{ v.description }}">{{ v.placeholder_name }}</option>{% endfor %}
+        </optgroup>
+        {% endfor %}
+      </select>
+    </div>
+    <button type="submit" class="btn btn-sm btn-primary">Add</button>
+  </form>
+</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Headers to strip {{ help_icon("Headers to strip", "Removed from every outbound INVITE delivered to this domain's users, up to 10. RFC 3261-mandatory headers (Via, From, To, Call-ID, CSeq, Max-Forwards) can never be stripped.") }}</span></div>
+{% if domain_strip_headers %}
+<table><thead><tr><th>Header name</th><th>Added</th><th></th></tr></thead>
+<tbody>{% for h in domain_strip_headers %}<tr>
+  <td class="mono">{{ h.header_name }}</td>
+  <td style="font-size:11px;color:#888780">{{ h.created_at }}</td>
+  <td><form method="POST" action="/domains/{{ domain.id }}/strip-headers/{{ h.id }}/delete" style="display:inline" onsubmit="return confirm('Remove this?')"><button type="submit" class="btn btn-sm">Remove</button></form></td>
+</tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty">No strip-headers added yet.</div>{% endif %}
+<div style="padding:16px;border-top:0.5px solid #e8e7e1">
+  <form method="POST" action="/domains/{{ domain.id }}/strip-headers/add" style="display:flex;gap:8px;align-items:end">
+    <div class="fg" style="margin:0"><label class="fl">Header name (up to 10)</label><input name="header_name" placeholder="Diversion" required></div>
+    <button type="submit" class="btn btn-sm btn-primary">Add</button>
+  </form>
+</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title"><i class="ti ti-plug-connected"></i> Enabled on SIP Profiles</span></div>
+<div data-live-region="profiles_q">
+<div style="padding:12px 16px 0">
+  <div style="font-size:12px;color:#888780;margin-bottom:8px">Which node/SIP-Profile combinations accept registrations for this domain -- a REGISTER for this domain is rejected unless enabled here.</div>
+{% call toolbar(page=profiles_page, total_pages=profiles_total_pages, total=profiles_total, page_param="profiles_page", q_param="profiles_q") %}
+  <div class="fg" style="margin:0"><label class="fl">Search</label><input name="profiles_q" value="{{ request.args.get('profiles_q', '') }}" placeholder="SIP Profile name..." data-live-search data-page-param="profiles_page"></div>
+{% endcall %}
+</div>
+<table><thead><tr><th>Node</th><th>SIP Profile</th><th>Accepts this domain</th><th>Routing plan {{ help_icon("Routing plan", "Overrides the SIP Profile's own default routing plan for calls involving this specific domain on this specific profile. Leave as \"Plan default\" to use whatever the profile is already set to.") }}</th><th>Media profile {{ help_icon("Media profile", "Overrides the SIP Profile's own default media profile for calls involving this specific domain on this specific profile. Leave as \"Profile default\" to use whatever the profile is already set to.") }}</th><th>Rate limit {{ help_icon("Rate limit", "Caps the combined call rate for this domain on this specific SIP Profile. Independent of any per-user rate limiting elsewhere in the platform.") }}</th><th></th></tr></thead>
+<tbody>{% for sp in sip_profiles %}<tr>
+  <td>{{ sp.node_name }}</td><td>{{ sp.name }} <span class="mono" style="font-size:11px;color:#888780">({{ sp.ip_addr }}:{{ sp.port }})</span></td>
+  <td>{% if sp.enabled %}<span class="badge badge-ok">Yes</span>{% else %}<span class="badge badge-bad">No</span>{% endif %}</td>
+  <td>
+    {% if sp.enabled %}
+    <form method="POST" action="/domains/{{ domain.id }}/sip-profiles/{{ sp.id }}/set-routing" style="display:flex;gap:4px;align-items:center">
+      <select name="routing_profile_id" style="width:140px" onchange="this.form.submit()">
+        <option value="">Plan default ({{ sp.default_routing_profile_name or 'none set' }})</option>
+        {% for rp in routing_profiles_by_node.get(sp.node_id, []) %}<option value="{{ rp.id }}" {{ 'selected' if sp.override_routing_profile_id==rp.id }}>{{ rp.name }}</option>{% endfor %}
+      </select>
+    </form>
+    {% else %}<span style="color:#888780;font-size:11px">enable first</span>{% endif %}
+  </td>
+  <td>
+    {% if sp.enabled %}
+    <form method="POST" action="/domains/{{ domain.id }}/sip-profiles/{{ sp.id }}/set-media" style="display:flex;gap:4px;align-items:center">
+      <select name="media_profile_id" style="width:160px" onchange="this.form.submit()">
+        <option value="">Profile default ({{ sp.default_media_profile_name or 'none set' }})</option>
+        {% for mp in media_profiles %}<option value="{{ mp.id }}" {{ 'selected' if sp.override_media_profile_id==mp.id }}>{{ mp.name }} ({{ mp.media_mode }})</option>{% endfor %}
+      </select>
+    </form>
+    {% else %}<span style="color:#888780;font-size:11px">enable first</span>{% endif %}
+  </td>
+  <td>
+    {% if sp.enabled %}
+    <form method="POST" action="/domains/{{ domain.id }}/sip-profiles/{{ sp.id }}/set-rate-limit" style="display:flex;gap:4px;align-items:center">
+      <input type="checkbox" name="rl_enabled" style="width:auto" {{ 'checked' if sp.rl_limit_value }} onchange="this.form.submit()">
+      <input name="rl_limit" type="number" value="{{ sp.rl_limit_value or 10 }}" style="width:55px" placeholder="limit" onblur="this.form.submit()">
+    </form>
+    {% else %}<span style="color:#888780;font-size:11px">enable first</span>{% endif %}
+  </td>
+  <td><form method="POST" action="/domains/{{ domain.id }}/sip-profiles/{{ sp.id }}/toggle">
+    <button type="submit" class="btn btn-sm">{{ 'Disable' if sp.enabled else 'Enable' }}</button>
+  </form></td>
+</tr>{% endfor %}</tbody></table>
+{% if not sip_profiles %}<div class="empty">No SIP Profiles on any node yet.</div>{% endif %}
+</div>
+</div>
+{% endblock %}

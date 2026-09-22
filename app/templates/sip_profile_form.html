@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">Add SIP Profile</h1>
+<p style="font-size:12px;color:#888780;margin:-8px 0 16px">A profile is one fixed IP:Port -- this belongs to exactly one profile, node-wide. Transports (UDP/TCP/TLS) are enabled/disabled against that same address afterward from the profile's own page, not created as separate listeners here.</p>
+<form method="POST">
+<div class="card"><div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Name {{ help_icon("Name", "Purely descriptive/display -- doesn't affect routing or listener behavior. Used to identify this profile when binding domains/trunks/routes to it elsewhere.") }}</label><input name="name" value="{{ profile.name if profile else '' }}" required></div>
+  <div class="fg"><label class="fl">IP address {{ help_icon("IP address", "The actual local address Kamailio binds to and listens on for this profile. Together with Port, this is what a trunk/subscriber's traffic must physically arrive on to be matched to this profile at all -- see Advertise IP below for what gets presented to the far end, which is often different (e.g. behind NAT).") }}</label><input name="ip_addr" value="{{ profile.ip_addr if profile else '' }}" required></div>
+  <div class="fg"><label class="fl">Port {{ help_icon("Port", "The local port this profile binds to, paired with IP address above. Standard SIP is 5060; a non-default port is fine but must match whatever the far end is actually configured to send to.") }}</label><input name="port" type="number" value="{{ profile.port if profile else 5060 }}"></div>
+  <div class="fg"><label class="fl">Default workers {{ help_icon("Default workers", "Kamailio worker processes dedicated to this listener. Higher values handle more concurrent SIP traffic on this specific profile at the cost of more system resources -- 4 is a reasonable default for most deployments, raise it only if this profile specifically is under heavy load.") }}</label><input name="workers_default" type="number" value="{{ profile.workers_default if profile else 4 }}"></div>
+  <div class="fg" style="grid-column:1/-1"><label class="fl">Advertise IP source {{ help_icon("Advertise IP source", "What this node tells the far end to actually use in SIP/SDP (Contact, Via, Record-Route, media) for this profile -- distinct from the local IP address above, which is only what Kamailio itself binds to. Use the node's Elastic IP for the common case (this node is behind a 1:1 NAT/EIP); use Custom if this profile specifically needs a different public-facing address than the node's own default.") }}</label>
+    <select name="advertise_source" id="advertise_source" onchange="document.getElementById('custom-ip-field').style.display = this.value=='custom' ? 'block' : 'none'">
+      <option value="node_eip">Use node's Elastic IP{% if node_eip %} ({{ node_eip }}){% else %} -- not set yet, configure in Node Settings{% endif %}</option>
+      <option value="custom">Custom (type a specific IP for this profile)</option>
+    </select>
+  </div>
+  <div class="fg" id="custom-ip-field" style="display:none"><label class="fl">Custom advertise IP {{ help_icon("Custom advertise IP", "Only used when Advertise IP source above is set to Custom -- the specific public-facing IP this profile presents to the far end, overriding the node's own default Elastic IP for this profile alone.") }}</label><input name="advertise_ip" value="{{ profile.advertise_ip if profile else '' }}"></div>
+  <div class="fg"><label class="fl">Advertise port (optional) {{ help_icon("Advertise port", "Optional -- if the public-facing port differs from the local listening Port above (e.g. behind a NAT/firewall doing port translation), set it here. Leave blank to advertise the same port this profile listens on.") }}</label><input name="advertise_port" type="number" value="{{ profile.advertise_port if profile else '' }}"></div>
+  <div class="fg"><label class="fl">Default routing plan {{ help_icon("Default routing plan", "Required -- the fallback routing profile used by any domain/trunk bound to this SIP Profile that doesn't have its own, more specific routing plan configured. Individual domains/trunks can still override this with their own plan.") }}</label>
+    <select name="default_routing_profile_id" required>
+      <option value="">-- select --</option>
+      {% for p in routing_profiles %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="fg"><label class="fl">Default media profile {{ help_icon("Default media profile", "Required -- the fallback media profile (codec order, DTMF mode, NAT handling) used by any domain/trunk bound to this SIP Profile that doesn't specify its own. Individual domains/trunks can still override this.") }}</label>
+    <select name="default_media_profile_id" required>
+      <option value="">-- select --</option>
+      {% for m in media_profiles %}<option value="{{ m.id }}">{{ m.name }} ({{ m.media_mode }})</option>{% endfor %}
+    </select>
+  </div>
+  <div class="fg" style="grid-column:1/-1;margin:-4px 0 0;font-size:11px;color:#888780">Required -- every domain/trunk/route tied to this SIP Profile uses this plan/profile by default unless overridden.</div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Transports</span></div>
+<div style="padding:16px">
+  <p style="font-size:11px;color:#888780;margin:0 0 10px">At least one must be enabled.</p>
+  <div style="display:flex;gap:20px;flex-wrap:wrap">
+    <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" name="transport_udp" checked> UDP</label>
+    <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" name="transport_tcp"> TCP</label>
+    <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" name="transport_tls" id="transport_tls_check" onchange="document.getElementById('tls-cert-field').style.display = this.checked ? 'block' : 'none'"> TLS</label>
+  </div>
+  <div id="tls-cert-field" style="display:none;margin-top:12px" class="fg">
+    <label class="fl">TLS Certificate {{ help_icon("TLS Certificate", "Required when TLS transport is enabled above -- the certificate this profile presents for TLS connections. Must already exist in the Certificates registry; add one there first if none are listed.") }}</label>
+    <select name="tls_certificate_id" data-searchable data-placeholder="Search certificates...">
+      <option value="">-- select --</option>
+      {% for c in certs %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+    </select>
+    {% if not certs %}<div style="font-size:11px;color:#a32d2d;margin-top:4px">No certificates in the registry yet -- add one from <a href="/certificates">Certificates</a> first.</div>{% endif %}
+  </div>
+</div></div>
+
+<button type="submit" class="btn btn-primary"><i class="ti ti-check"></i> Create profile</button>
+<a href="/nodes/{{ node_id }}/sip-profiles" class="btn">Cancel</a>
+</form>
+{% endblock %}

@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block content %}
+<div style="margin-bottom:12px"><a href="/nodes/{{ node.id }}/sip-profiles" class="btn btn-sm"><i class="ti ti-arrow-left"></i> Back to SIP Profiles</a></div>
+{% include "_pending_banner.html" %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">{{ node.name }} / {{ profile.name }}{% if profile.is_default %} <span class="badge badge-info">default</span>{% endif %}
+  <span style="font-size:13px;color:#888780;font-weight:400"> -- {{ profile.ip_addr }}:{{ profile.port }}</span></h1>
+
+<div class="card"><div class="card-head"><span class="card-title">Settings</span></div>
+<form method="POST" action="/sip-profiles/{{ profile.id }}/edit" style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Default workers {{ help_icon("Default workers", "How many Kamailio worker processes are dedicated to this SIP Profile's listener(s). More workers handle higher concurrent signaling load, at the cost of more memory/CPU per process. Takes effect on next Apply & Restart.") }}</label><input name="workers_default" type="number" value="{{ profile.workers_default }}"></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="uses_node_eip" style="width:auto" {{ 'checked' if profile.uses_node_eip }} onchange="document.getElementById('custom-ip-field').style.display = this.checked ? 'none' : 'block'"><label class="fl" style="margin:0">Follow node's Elastic IP{% if node.elastic_ip %} ({{ node.elastic_ip }}){% endif %} {{ help_icon("Follow node's Elastic IP", "When checked, this profile automatically advertises whatever the node's own Elastic IP is set to (Node Settings page) -- if that changes, this profile's advertised address changes with it. Uncheck to pin a fixed advertise address that won't move even if the node's EIP does.") }}</label></div>
+  <div class="fg" id="custom-ip-field" style="display:{{ 'none' if profile.uses_node_eip else 'block' }}"><label class="fl">Custom advertise IP {{ help_icon("Custom advertise IP", "The fixed public address this profile's listener advertises in Via/Contact/Record-Route headers, independent of the node's own Elastic IP. Only used when \"Follow node's Elastic IP\" above is unchecked.") }}</label><input name="advertise_ip" value="{{ profile.advertise_ip or '' }}"></div>
+  <div class="fg"><label class="fl">Advertise port (optional) {{ help_icon("Advertise port", "The port advertised in Via/Contact/Record-Route headers, if different from the listener's own bound port (e.g. behind a NAT/load balancer doing port translation). Leave blank to advertise the same port the listener is actually bound to.") }}</label><input name="advertise_port" type="number" value="{{ profile.advertise_port or '' }}"></div>
+  <div class="fg"><label class="fl">Default routing plan {{ help_icon("Default routing plan", "Every domain/trunk/route tied to this SIP Profile uses this plan by default unless overridden individually. Required -- if this is left unset, calls routed through this profile have no plan to resolve against.") }}</label><select name="default_routing_profile_id" required>
+    <option value="">-- select --</option>
+    {% for p in routing_profiles %}<option value="{{ p.id }}" {{ 'selected' if profile.default_routing_profile_id==p.id }}>{{ p.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">Default media profile {{ help_icon("Default media profile", "Every domain/trunk/route tied to this SIP Profile uses this Media Profile by default unless overridden individually. Required -- if this is left unset, calls routed through this profile have no codec/DTMF/SRTP/fax policy to resolve against.") }}</label><select name="default_media_profile_id" required>
+    <option value="">-- select --</option>
+    {% for m in media_profiles %}<option value="{{ m.id }}" {{ 'selected' if profile.default_media_profile_id==m.id }}>{{ m.name }} ({{ m.media_mode }})</option>{% endfor %}
+  </select></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="topoh_mask_inbound" style="width:auto" {{ 'checked' if profile.topoh_mask_inbound }}><label class="fl" style="margin:0">Topology hiding, inbound {{ help_icon("Topology hiding, inbound", "Whether our topology is masked in traffic relayed onward that originated from this profile. This is the ROOT of the inheritance chain -- Trunks and Domains on this profile can individually override it, but this is what they fall back to when they don't. Enabled by default.") }}</label></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="topoh_mask_outbound" style="width:auto" {{ 'checked' if profile.topoh_mask_outbound }}><label class="fl" style="margin:0">Topology hiding, outbound {{ help_icon("Topology hiding, outbound", "Whether our topology is masked in traffic being delivered to a Trunk/Domain on this profile. This is the ROOT of the inheritance chain -- Trunks and Domains on this profile can individually override it, but this is what they fall back to when they don't. Enabled by default.") }}</label></div>
+  <div style="grid-column:1/-1"><button type="submit" class="btn btn-sm btn-primary">Save settings</button></div>
+</form>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">IP and Port are fixed at creation and can't be changed here -- an IP:Port belongs to exactly one profile. To change the address, create a new profile and reassign what's using this one.</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Silent-drop unmatched in-dialog requests {{ help_icon("Silent-drop unmatched in-dialog requests", "When an in-dialog request (BYE, or anything carrying a To-tag) doesn't match a real, established dialog -- a fabricated/guessed probe -- Enabled silently drops it with no reply (default, avoids confirming a live SIP server is present to a scanner). Disabled sends a real 404 instead, for a listener that genuinely needs standard protocol behavior (e.g. known interop-testing peer). Overrides the node-wide default (Node Settings) for traffic on this profile specifically.") }}</span></div>
+<form method="POST" action="/sip-profiles/{{ profile.id }}/security-flags" style="padding:16px;display:flex;gap:12px;align-items:end;flex-wrap:wrap">
+  <div class="fg"><label class="fl">Silent-drop unmatched in-dialog requests</label><select name="silent_drop_unmatched_dialog">
+    <option value="" {{ 'selected' if not security_flags.silent_drop_unmatched_dialog.profile_override }}>Node default ({{ security_flags.silent_drop_unmatched_dialog.node_effective_value }})</option>
+    <option value="on" {{ 'selected' if security_flags.silent_drop_unmatched_dialog.profile_override == 'on' }}>Enabled (silent drop)</option>
+    <option value="off" {{ 'selected' if security_flags.silent_drop_unmatched_dialog.profile_override == 'off' }}>Disabled (send 404)</option>
+  </select></div>
+  <button type="submit" class="btn btn-sm btn-primary">Save</button>
+</form>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title"><i class="ti ti-shield-lock"></i> SIP Security</span></div>
+<div style="padding:0 16px;font-size:11px;color:#888780">Controls what happens when a REGISTER arrives for this profile but the domain/user isn't recognized. Kept separate from the domain's own "username not found" setting (on the domain's own edit page) -- these two fire before that check even runs, when the domain itself isn't served here at all.</div>
+<form method="POST" action="/sip-profiles/{{ profile.id }}/security" style="padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:24px">
+  <div>
+    <div style="font-size:12px;font-weight:500;margin-bottom:8px">Domain not bound to this profile {{ help_icon("Domain not bound to this profile", "The domain exists somewhere in the system, just isn't enabled on THIS SIP Profile's \"Enabled on SIP Profiles\" list. Drop Silently gives a scanner nothing to work with; Reject sends a specific SIP response.") }}</div>
+    <div class="fg"><label class="fl">Behavior {{ help_icon("Behavior", "What to do with a REGISTER for a domain/user not served by this profile. Reject sends the SIP response configured below. Drop Silently sends nothing at all -- gives a port-scanning attacker no confirmation this profile even exists. Challenge (anti-enumeration) answers with the same 401 authentication challenge a real registered user would get, so an attacker probing usernames can't tell which extensions exist -- existing and non-existing accounts look identical. Challenge is the strongest against user enumeration; Drop Silently is strongest against profile discovery.") }}</label><select name="unbound_domain_action" onchange="document.getElementById('unbound-reason-fields').style.display = this.value === 'reject' ? 'block' : 'none'">
+      <option value="reject" {{ 'selected' if profile.unbound_domain_action=='reject' }}>Reject</option>
+      <option value="drop" {{ 'selected' if profile.unbound_domain_action=='drop' }}>Drop Silently</option>
+      <option value="challenge" {{ 'selected' if profile.unbound_domain_action=='challenge' }}>Challenge (anti-enumeration)</option>
+    </select></div>
+    <div id="unbound-reason-fields" style="display:{{ 'block' if profile.unbound_domain_action != 'drop' else 'none' }}">
+      <div class="fg"><label class="fl">Reason code {{ help_icon("Reason code", "The SIP response code sent when Behavior above is Reject -- must be a valid 3xx-6xx status code.") }}</label><input name="unbound_domain_code" type="number" min="300" max="699" value="{{ profile.unbound_domain_code or 404 }}"></div>
+      <div class="fg"><label class="fl">Reason text {{ help_icon("Reason text", "The SIP response's reason phrase, sent alongside the Reason code above.") }}</label><input name="unbound_domain_text" value="{{ profile.unbound_domain_text or 'Domain is not bound to this profile' }}"></div>
+    </div>
+  </div>
+  <div>
+    <div style="font-size:12px;font-weight:500;margin-bottom:8px">Domain not found {{ help_icon("Domain not found", "This platform doesn't recognize the domain at all -- not just \"not enabled here\", genuinely unknown. Same Drop Silently / Reject choice, kept as a separate setting since an admin may want to distinguish a typo'd domain from a real one that's just not bound yet.") }}</div>
+    <div class="fg"><label class="fl">Behavior {{ help_icon("Behavior", "Reject sends the SIP response configured below. Drop Silently sends nothing at all -- gives a port-scanning attacker no confirmation this profile even exists.") }}</label><select name="domain_not_found_action" onchange="document.getElementById('notfound-reason-fields').style.display = this.value === 'reject' ? 'block' : 'none'">
+      <option value="reject" {{ 'selected' if profile.domain_not_found_action=='reject' }}>Reject</option>
+      <option value="drop" {{ 'selected' if profile.domain_not_found_action=='drop' }}>Drop Silently</option>
+    </select></div>
+    <div id="notfound-reason-fields" style="display:{{ 'block' if profile.domain_not_found_action != 'drop' else 'none' }}">
+      <div class="fg"><label class="fl">Reason code {{ help_icon("Reason code", "The SIP response code sent when Behavior above is Reject -- must be a valid 3xx-6xx status code.") }}</label><input name="domain_not_found_code" type="number" min="300" max="699" value="{{ profile.domain_not_found_code or 404 }}"></div>
+      <div class="fg"><label class="fl">Reason text {{ help_icon("Reason text", "The SIP response's reason phrase, sent alongside the Reason code above.") }}</label><input name="domain_not_found_text" value="{{ profile.domain_not_found_text or 'Domain not found' }}"></div>
+    </div>
+  </div>
+  <div style="grid-column:1/-1"><button type="submit" class="btn btn-sm btn-primary">Save SIP Security settings</button></div>
+</form>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Transports</span></div>
+<div style="padding:16px">
+  <table><thead><tr><th>Transport</th><th>Certificate</th><th>Trunks using it</th><th></th></tr></thead>
+  <tbody>
+    {% for t in ['udp', 'tcp', 'tls'] %}
+    {% set l = listeners|selectattr('transport', 'equalto', t)|first %}
+    <tr>
+      <td><b>{{ t|upper }}</b></td>
+      <td>{% if t == 'tls' %}{{ l.cert_name if l else '-' }}{% else %}<span style="color:#888780">n/a</span>{% endif %}</td>
+      <td>{{ l.trunk_count if l else 0 }}</td>
+      <td>
+        {% if l %}
+        <form method="POST" action="/sip-profiles/{{ profile.id }}/transports/{{ t }}/disable" style="display:inline">
+          <button type="submit" class="btn btn-sm" {{ 'disabled' if listeners|length <= 1 or l.trunk_count > 0 }}
+            title="{% if listeners|length <= 1 %}A profile must always have at least one enabled transport{% elif l.trunk_count > 0 %}{{ l.trunk_count }} trunk(s) still using this transport -- reassign or remove them first{% endif %}"
+            onclick="return confirm('Disable {{ t|upper }} on this profile?')">Disable</button>
+        </form>
+        {% else %}
+        <form method="POST" action="/sip-profiles/{{ profile.id }}/transports/{{ t }}/enable" style="display:inline;display:flex;gap:6px;align-items:center">
+          {% if t == 'tls' %}
+          {{ help_icon("Certificate", "Which certificate this profile's TLS listener presents to peers. Manage the certificate registry itself from the Certificates page.") }}
+          <select name="certificate_id" data-searchable data-placeholder="Search certificates..." style="width:180px">
+            <option value="">-- select cert --</option>{% for c in certs %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+          </select>
+          {% endif %}
+          <button type="submit" class="btn btn-sm">Enable</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody></table>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Bound to this profile</span></div>
+<div style="padding:16px">
+  <p style="font-size:12px;margin:0 0 6px"><b>{{ domains|length }}</b> domain(s): {% for d in domains %}<a href="/domains/{{ d.id }}" class="badge badge-info" style="margin-right:4px">{{ d.name }}</a>{% else %}<span style="color:#888780">none</span>{% endfor %}</p>
+  <p style="font-size:12px;margin:0"><b>{{ trunks|length }}</b> trunk(s): {% for t in trunks %}<span class="badge badge-info" style="margin-right:4px">{{ t.name }} ({{ t.transport|upper }})</span>{% else %}<span style="color:#888780">none</span>{% endfor %}</p>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title" style="color:#a32d2d">Delete this profile</span></div>
+<div style="padding:16px">
+  {% if domains|length > 0 or trunks|length > 0 %}
+  <p style="font-size:12px;color:#a32d2d;margin:0 0 10px">Can't delete yet -- unbind all domains and remove/reassign all trunks first (see above).</p>
+  <button class="btn btn-danger" disabled>Delete profile</button>
+  {% else %}
+  <p style="font-size:12px;color:#888780;margin:0 0 10px">Nothing is using this profile -- safe to delete.</p>
+  <a href="/sip-profiles/{{ profile.id }}/delete" class="btn btn-danger" onclick="return confirm('Permanently delete {{ profile.name }}?')">Delete profile</a>
+  {% endif %}
+</div></div>
+{% endblock %}

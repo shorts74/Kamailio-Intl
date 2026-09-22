@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">Edit rule</h1>
+{% if engine_type == 'lcr' %}
+<form method="POST" action="/routing-rules/{{ rule.id }}/edit">
+<div class="card"><div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Name</label><input name="name" value="{{ rule.name }}" required></div>
+  <div class="fg"><label class="fl">Called prefix {{ help_icon("Called prefix", "Add multiple rows sharing the SAME prefix to give the LCR engine several carriers to try in cost order for calls to that prefix -- this is what makes it an LCR (least-cost routing) list, not a single destination.") }}</label><input name="prefix" value="{{ rule.prefix or '' }}" placeholder="e.g. 61 or full DID" required></div>
+  <div class="fg"><label class="fl">Trunk (this row's carrier) {{ help_icon("Trunk", "This row's specific carrier for the prefix above. Add more rows with the same prefix and a different trunk each to build out the full cost-ranked list Kamailio picks from live, in-call.") }}</label><select name="dest_trunk_id" data-searchable data-placeholder="Search trunks..." required>
+    <option value="">--</option>{% for t in trunks %}<option value="{{ t.id }}" {{ 'selected' if rule.dest_trunk_id == t.id }}>{{ t.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">Priority {{ help_icon("Priority", "0 = tried first (cheapest/most preferred), higher numbers tried later.") }}</label><input name="priority" type="number" value="{{ rule.priority }}"></div>
+  <div class="fg"><label class="fl">Weight {{ help_icon("Weight", "1-254. Only matters as a tie-break among rows sharing the same priority for the same prefix.") }}</label><input name="lcr_weight" type="number" value="{{ rule.lcr_weight or 1 }}" min="1" max="254"></div>
+</div></div>
+<button type="submit" class="btn btn-primary"><i class="ti ti-check"></i> Save changes</button>
+<a href="/routing-profiles/{{ rule.routing_profile_id }}" class="btn">Cancel</a>
+</form>
+{% else %}
+<form method="POST" action="/routing-rules/{{ rule.id }}/edit">
+<input type="hidden" name="match_type" value="{{ rule.match_type }}">
+<div class="card"><div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Name</label><input name="name" value="{{ rule.name }}" required></div>
+  {% if rule.match_type == 'prefix' %}
+  <div class="fg"><label class="fl">Called prefix {{ help_icon("Called prefix", "Matches any called number starting with these digits -- a full-length prefix (the entire number) is just an exact-match DID, no separate DID concept needed. Longest matching prefix wins over a shorter/more general one.") }}</label><input name="prefix" value="{{ rule.prefix or '' }}" placeholder="e.g. 1212 or full DID"></div>
+  <div class="fg"><label class="fl">Caller prefix (optional) {{ help_icon("Caller prefix", "Restricts this rule to only match when the CALLER's number also starts with this prefix. Rules with a caller prefix set are always tried before general (any-caller) rules. Leave blank to match any caller.") }}</label><input name="caller_prefix" value="{{ rule.caller_prefix or '' }}" placeholder="any caller if blank"></div>
+  {% else %}
+  <div class="fg"><label class="fl">Called pattern {{ help_icon("Called pattern", "A regular expression matched against the called number -- standard POSIX regex syntax (e.g. ^1(212|917) matches numbers starting with 1212 or 1917).") }}</label><input name="pattern" value="{{ rule.pattern or '' }}" placeholder="e.g. ^1(212|917)"></div>
+  <div class="fg"><label class="fl">Caller pattern (optional) {{ help_icon("Caller pattern", "Restricts this rule to only match when the CALLER's number also matches this regex. Rules with a caller pattern set are always tried before general (any-caller) rules. Leave blank to match any caller.") }}</label><input name="caller_pattern" value="{{ rule.caller_pattern or '' }}" placeholder="any caller if blank"></div>
+  {% endif %}
+  <div class="fg"><label class="fl">Friendly name {{ help_icon("Friendly name", "Optional, display-only label shown instead of the internal rule Name elsewhere in the UI (e.g. for a DID, something more recognizable than an auto-generated rule name). Purely cosmetic -- has no effect on matching or routing.") }}</label><input name="friendly_name" value="{{ rule.friendly_name or '' }}" placeholder="for DIDs"></div>
+  <div class="fg"><label class="fl">Trunk {{ help_icon("Destination", "Pick exactly ONE of Trunk / Group / User / Jump to plan as this rule's destination -- setting more than one is not a valid, meaningful combination. Leave all blank (with Trace and/or Record checked) for a monitoring-only rule with no actual destination.") }}</label><select name="dest_trunk_id" data-searchable data-placeholder="Search trunks...">
+    <option value="">--</option>{% for t in trunks %}<option value="{{ t.id }}" {{ 'selected' if rule.dest_trunk_id == t.id }}>{{ t.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">or Group</label><select name="dest_gateway_group_id" data-searchable data-placeholder="Search groups...">
+    <option value="">--</option>{% for g in groups %}<option value="{{ g.id }}" {{ 'selected' if rule.dest_gateway_group_id == g.id }}>{{ g.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">or User</label><select name="dest_subscriber_id" data-searchable data-placeholder="Search users...">
+    <option value="">--</option>{% for s in subscribers %}<option value="{{ s.id }}" {{ 'selected' if rule.dest_subscriber_id == s.id }}>{{ s.username }}@{{ s.domain_name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">or Jump to plan {{ help_icon("Jump to plan", "Instead of a trunk/group/user, redirect this matching call to another routing plan entirely -- evaluated live at call time, not pre-resolved. Different from Fallback plan: fallback only fires when NOTHING in this plan matches at all; a jump fires when THIS SPECIFIC rule matches. Bounded by a shared max-hop safeguard (10 hops) to catch accidental loops between plans -- a call that hits the limit is rejected with 508 Loop Detected.") }}</label><select name="jump_to_routing_profile_id" data-searchable data-placeholder="Search plans...">
+    <option value="">--</option>{% for p in other_profiles %}<option value="{{ p.id }}" {{ 'selected' if rule.jump_to_routing_profile_id == p.id }}>{{ p.name }} ({{ p.engine_type }})</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">Failover trunk {{ help_icon("Failover trunk", "If the primary destination's call attempt fails (5xx/408 or unreachable), Kamailio automatically retries this trunk instead, live, in-call -- no separate rule needed. Optional; leave blank for no automatic failover.") }}</label><select name="failover_trunk_id" data-searchable data-placeholder="Search trunks...">
+    <option value="">--</option>{% for t in trunks %}<option value="{{ t.id }}" {{ 'selected' if rule.failover_trunk_id == t.id }}>{{ t.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">Media profile (optional) {{ help_icon("Media profile", "Which codec/media policy applies to calls matching this rule. Leave as \"Inherit from trunk\" to use the destination trunk's own configured media profile instead of overriding it here.") }}</label><select name="media_profile_id" data-searchable data-placeholder="Search media profiles...">
+    <option value="">Inherit from trunk</option>{% for m in media_profiles %}<option value="{{ m.id }}" {{ 'selected' if rule.media_profile_id == m.id }}>{{ m.name }} ({{ m.media_mode }})</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">Priority {{ help_icon("Priority", "Among multiple rules that could otherwise tie (same prefix/pattern specificity), the lower priority number is tried first. Only matters as a tie-break -- longest-prefix-match and caller-specific-before-general already take precedence over this.") }}</label><input name="priority" type="number" value="{{ rule.priority }}"></div>
+  {% if rule.match_type == 'prefix' %}<div class="fg"><label class="fl">LCR group {{ help_icon("LCR group", "Give two or more rules sharing the same Called prefix the same LCR group name, and the cheapest one (by matching Rate Plan entries) is picked automatically at sync time instead of by Priority. For live, in-call failover if the cheapest carrier is actually down, use a dedicated LCR-type plan instead.") }}</label><input name="lcr_group" value="{{ rule.lcr_group or '' }}"></div>{% endif %}
+  <div class="fg"><label class="fl">Strip called {{ help_icon("Strip called", "Removes this many digits from the FRONT of the called number, applied before Prepend called.") }}</label><input name="strip_digits" type="number" value="{{ rule.strip_digits or 0 }}"></div>
+  <div class="fg"><label class="fl">Prepend called {{ help_icon("Prepend called", "Adds these digits to the FRONT of the called number, applied after Strip called.") }}</label><input name="prepend_digits" value="{{ rule.prepend_digits or '' }}"></div>
+  <div class="fg"><label class="fl">Strip caller {{ help_icon("Strip caller", "Same as Strip called, but applied to the caller ID / calling number instead of the called number.") }}</label><input name="caller_strip_digits" type="number" value="{{ rule.caller_strip_digits or 0 }}"></div>
+  <div class="fg"><label class="fl">Prepend caller {{ help_icon("Prepend caller", "Same as Prepend called, but applied to the caller ID / calling number instead of the called number.") }}</label><input name="caller_prepend_digits" value="{{ rule.caller_prepend_digits or '' }}"></div>
+  {% if rule.match_type == 'prefix' %}<div class="fg"><label class="fl">Extension {{ help_icon("Extension", "Will only be used if not empty -- overrides the called number to this exact fixed value after all strip/prepend manipulation above has already been applied. A hard override, not another transformation stacked on top. Leave blank to use the manipulated number as-is.") }}</label><input name="forced_called_number" value="{{ rule.forced_called_number or '' }}" placeholder="Leave blank for no override"></div>{% endif %}
+  {% if rule.match_type == 'prefix' %}<div class="fg"><label class="fl">Fixed Caller ID {{ help_icon("Fixed Caller ID", "Will only be used if not empty -- overrides the caller ID to this exact fixed value after all strip/prepend manipulation above has already been applied. A hard override, not another transformation stacked on top -- same idea as Extension, but for the caller ID. Leave blank to use the manipulated caller ID as-is.") }}</label><input name="forced_calling_number" value="{{ rule.forced_calling_number or '' }}" placeholder="Leave blank for no override"></div>{% endif %}
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="trace_enabled" {{ 'checked' if rule.trace_enabled }} style="width:auto"><label class="fl">Trace {{ help_icon("Trace", "Tags matching calls for SIP-level packet tracing (visible via a Homer-compatible capture tool), for troubleshooting. Has no effect on routing itself.") }}</label></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="record_enabled" {{ 'checked' if rule.record_enabled }} style="width:auto"><label class="fl">Record {{ help_icon("Record", "Tags matching calls for call recording (media capture), if this node's RTPEngine is configured for it. Has no effect on routing itself.") }}</label></div>
+</div></div>
+<div style="font-size:11px;color:#888780;margin:8px 0">Pick exactly one destination (trunk, group, user, or jump-to-plan) -- or leave all blank and check Trace/Record for a monitoring-only rule.</div>
+<button type="submit" class="btn btn-primary"><i class="ti ti-check"></i> Save changes</button>
+<a href="/routing-profiles/{{ rule.routing_profile_id }}" class="btn">Cancel</a>
+</form>
+{% endif %}
+{% endblock %}

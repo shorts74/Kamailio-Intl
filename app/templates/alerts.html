@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+  <h1 style="font-size:18px;font-weight:500;margin:0">Alerts</h1>
+  <div>
+    <a href="/alerts?filter=active" class="btn btn-sm {{ 'btn-primary' if filter_type=='active' }}">Active</a>
+    <a href="/alerts?filter=resolved" class="btn btn-sm {{ 'btn-primary' if filter_type=='resolved' }}">Resolved</a>
+    <a href="/alerts?filter=all" class="btn btn-sm {{ 'btn-primary' if filter_type=='all' }}">All</a>
+  </div>
+</div>
+<div class="card">
+  {% if alerts %}
+  <table><thead><tr><th>Type</th><th>Entity</th><th>Message</th><th>Started</th><th>Resolved</th><th>Duration</th></tr></thead>
+  <tbody>{% for a in alerts %}<tr>
+    <td><span class="badge badge-{{ 'bad' if a.severity=='critical' else 'warn' }}">{{ a.alert_type }}</span></td>
+    <td>{{ a.entity_name }}</td><td>{{ a.message }}</td>
+    <td>{{ a.started_at }}</td>
+    <td>{% if a.resolved_at %}{{ a.resolved_at }}{% else %}<span class="badge badge-bad">Open</span>{% endif %}</td>
+    <td>{% if a.resolved_at %}{{ ((a.resolved_at - a.started_at).total_seconds() // 60)|int }}m{% else %}ongoing{% endif %}</td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No {{ filter_type }} alerts.</div>{% endif %}
+</div>
+{% endblock %}

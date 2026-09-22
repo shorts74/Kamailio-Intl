@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">Node bundle</h1>
+
+{% if flash_msg %}<div class="alert {{ 'alert-ok' if flash_ok else 'alert-bad' }}" style="margin-bottom:16px">{{ flash_msg }}</div>{% endif %}
+
+<div class="card"><div class="card-head"><span class="card-title">What this is</span></div>
+<div style="padding:16px;font-size:12px;color:#888780;line-height:1.6">
+  The Manager's own authoritative copy of the node-side kamailio.cfg.template and scripts. Every node's
+  <strong>Apply &amp; Restart</strong> pushes exactly what's stored here before syncing and restarting -- this is what
+  makes a restart apply the latest <em>code</em>, not just the latest data. Without an upload here, Apply &amp; Restart
+  only ever refreshes data and re-runs whatever's already on each node's disk.
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Upload new bundle</span></div>
+<div style="padding:16px">
+  <form method="POST" enctype="multipart/form-data" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+    <div class="fg" style="margin:0"><label class="fl">Node package (.zip)</label><input type="file" name="bundle_zip" accept=".zip" required></div>
+    <button type="submit" class="btn btn-sm"><i class="ti ti-upload"></i> Upload &amp; update</button>
+  </form>
+  <p style="font-size:11px;color:#888780;margin:10px 0 0">
+    Expects the same sip-platform-v3-node.zip package structure, with files under <code>infrastructure/</code>.
+    Only the files below are extracted -- anything else in the zip is ignored.
+  </p>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Currently stored</span></div>
+<div style="padding:16px">
+  {% if uploaded_at %}<p style="font-size:12px;color:#888780;margin:0 0 12px">Last uploaded: {{ uploaded_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</p>{% endif %}
+  <table>
+    <thead><tr><th>File</th><th>Status</th><th>Last updated</th></tr></thead>
+    <tbody>
+    {% for fname in expected_files %}
+    <tr>
+      <td class="mono">{{ fname }}</td>
+      {% if fname in current %}
+      <td><span class="badge badge-ok">Present</span></td>
+      <td style="font-size:11px;color:#888780">{{ current[fname].strftime('%Y-%m-%d %H:%M:%S') }}</td>
+      {% else %}
+      <td><span class="badge badge-bad">Missing</span></td>
+      <td style="color:#888780">--</td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if current|length < expected_files|length %}
+  <p style="font-size:11px;color:#888780;margin:12px 0 0">
+    Missing files fall back to whatever's already on each node's disk when Apply &amp; Restart pushes the bundle -- upload a complete package to ensure every file is current everywhere.
+  </p>
+  {% endif %}
+</div></div>
+{% endblock %}

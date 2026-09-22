@@ -1,0 +1,59 @@
+{% from "_toolbar.html" import toolbar %}
+<div class="card">
+  <div class="card-head"><span class="card-title"><i class="ti ti-clipboard-list"></i> Audit log</span></div>
+  <div data-live-region="audit_q">
+  {% call toolbar(page=audit.page, total_pages=audit.total_pages, total=audit.total, page_param="audit_page", q_param="audit_q") %}
+    <div class="fg" style="margin:0"><label class="fl">Search</label><input name="audit_q" value="{{ request.args.get('audit_q', '') }}" placeholder="details..." data-live-search data-page-param="audit_page"></div>
+    <div class="fg" style="margin:0"><label class="fl">User</label><select name="audit_actor" onchange="this.form.submit()">
+      <option value="">All</option>
+      {% for a in audit.actors %}<option value="{{ a }}" {{ 'selected' if audit.actor==a }}>{{ a }}</option>{% endfor %}
+    </select></div>
+    <div class="fg" style="margin:0"><label class="fl">Component</label><select name="audit_component" onchange="this.form.submit()">
+      <option value="">All</option>
+      {% for c in audit.components %}<option value="{{ c }}" {{ 'selected' if audit.component==c }}>{{ c }}</option>{% endfor %}
+    </select></div>
+    <div class="fg" style="margin:0"><label class="fl">Sort</label><select name="audit_sort" onchange="this.form.submit()">
+      <option value="created_desc" {{ 'selected' if audit.sort=='created_desc' }}>Newest first</option>
+      <option value="created_asc" {{ 'selected' if audit.sort=='created_asc' }}>Oldest first</option>
+      <option value="actor" {{ 'selected' if audit.sort=='actor' }}>User</option>
+      <option value="component" {{ 'selected' if audit.sort=='component' }}>Component</option>
+    </select></div>
+  {% endcall %}
+  <table>
+    <thead><tr>
+      <th>When</th><th>User</th><th>Component</th><th>Action</th>
+      {% if show_node %}<th>Node</th>{% endif %}
+      <th>What changed</th>
+    </tr></thead>
+    <tbody>
+    {% for row in audit.rows %}
+      <tr>
+        <td style="white-space:nowrap;font-size:11px;color:#888780">{{ row.created_at.strftime('%Y-%m-%d %H:%M:%S') if row.created_at else '' }}</td>
+        <td>{{ row.actor }}</td>
+        <td><span class="badge badge-info">{{ row.entity_type }}</span></td>
+        <td style="text-transform:capitalize">{{ row.action }}</td>
+        {% if show_node %}<td>{% if row.node_id %}<a href="/nodes/{{ row.node_id }}/dashboard">{{ node_names.get(row.node_id, '#' ~ row.node_id) }}</a>{% else %}<span style="color:#888780">-- global --</span>{% endif %}</td>{% endif %}
+        <td>
+          {{ row.summary or '(' ~ row.entity_type ~ ' #' ~ (row.entity_id if row.entity_id is not none else '-') ~ ' ' ~ row.action ~ ')' }}
+          {% if row.changed_fields %}
+          <div style="font-size:11px;color:#888780;margin-top:2px">
+            {% for fname, fval in row.changed_fields.items() %}
+              {% if fval is mapping and fval.get('sensitive') %}
+                <span title="Sensitive field -- value not logged">{{ fname }}: (sensitive, not logged)</span>{% if not loop.last %}, {% endif %}
+              {% elif fval is mapping and 'before' in fval and 'after' in fval %}
+                <span>{{ fname }}: {{ fval.before }} &rarr; {{ fval.after }}</span>{% if not loop.last %}, {% endif %}
+              {% else %}
+                <span>{{ fname }}: {{ fval }}</span>{% if not loop.last %}, {% endif %}
+              {% endif %}
+            {% endfor %}
+          </div>
+          {% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="{{ 6 if show_node else 5 }}" style="text-align:center;color:#888780">No audit events{% if audit.actor or audit.component or request.args.get('audit_q') %} match the current filters{% endif %}.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>

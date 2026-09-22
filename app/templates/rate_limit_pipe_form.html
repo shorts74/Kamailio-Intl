@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">Edit rate limit pipe</h1>
+<form method="POST" action="/rate-limit-pipes/{{ pipe.id }}/edit">
+<div class="card"><div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Name</label><input name="name" value="{{ pipe.name }}" required></div>
+  <div class="fg"><label class="fl">Scope</label><select name="scope_type" id="scope_type" onchange="
+    document.getElementById('sc_trunk').style.display = this.value=='trunk' ? 'block' : 'none';
+    document.getElementById('sc_domain').style.display = this.value=='domain' ? 'block' : 'none';
+    document.getElementById('sc_user').style.display = this.value=='user' ? 'block' : 'none';
+  ">
+    <option value="global">Global (system-wide)</option>
+    <option value="register">REGISTER (per-source flood)</option>
+    <option value="trunk">Trunk</option>
+    <option value="domain">Domain</option>
+    <option value="user">User</option>
+  </select></div>
+  <div class="fg" style="display:none" id="sc_trunk"><label class="fl">Trunk</label><select name="trunk_id" data-searchable data-placeholder="Search trunks...">
+    <option value="">--</option>{% for t in trunks %}<option value="{{ t.id }}" {{ 'selected' if pipe.trunk_id == t.id }}>{{ t.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg" style="display:none" id="sc_domain"><label class="fl">Domain</label><select name="domain_id" data-searchable data-placeholder="Search domains...">
+    <option value="">--</option>{% for d in domains %}<option value="{{ d.id }}" {{ 'selected' if pipe.domain_id == d.id }}>{{ d.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg" style="display:none" id="sc_user"><label class="fl">User</label><select name="subscriber_id" data-searchable data-placeholder="Search users...">
+    <option value="">--</option>{% for s in subscribers %}<option value="{{ s.id }}" {{ 'selected' if pipe.subscriber_id == s.id }}>{{ s.username }}@{{ s.domain_name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">Algorithm</label><select name="algorithm" id="algorithm">
+    <option value="TAILDROP">TAILDROP -- hard cutoff at limit</option>
+    <option value="RED">RED -- spreads drops evenly</option>
+    <option value="NETWORK">NETWORK -- bandwidth-based</option>
+    <option value="FEEDBACK">FEEDBACK -- CPU/load-based (global scope only)</option>
+  </select></div>
+  <div class="fg"><label class="fl">Limit</label><input name="limit_value" type="number" value="{{ pipe.limit_value }}"></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="enabled" id="enabled" style="width:auto"><label class="fl">Enabled</label></div>
+  <div class="fg" style="grid-column:1/-1"><label class="fl">Description</label><input name="description" value="{{ pipe.description or '' }}"></div>
+</div></div>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  document.getElementById('scope_type').value = "{{ pipe.scope_type }}";
+  document.getElementById('scope_type').dispatchEvent(new Event('change'));
+  document.getElementById('algorithm').value = "{{ pipe.algorithm }}";
+  document.getElementById('enabled').checked = {{ 'true' if pipe.enabled else 'false' }};
+});
+</script>
+<button type="submit" class="btn btn-primary"><i class="ti ti-check"></i> Save changes</button>
+<a href="/nodes/{{ node_id }}/rate-limit-pipes" class="btn">Cancel</a>
+</form>
+{% endblock %}

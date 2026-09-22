@@ -1,0 +1,284 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+{% include "_node_tabs.html" %}
+{% include "_pending_banner.html" %}
+
+<div style="margin:0 0 14px">
+  {% if node.enabled %}<span class="badge badge-ok">Enabled</span>{% else %}<span class="badge badge-bad">Disabled</span>{% endif %}
+</div>
+
+<div style="display:flex;align-items:center;gap:10px;margin:8px 0 14px;font-size:12px">
+  <label style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="autorefresh-toggle" checked onchange="toggleAutorefresh()"> Auto-refresh every</label>
+  <select id="autorefresh-interval" style="width:70px" onchange="restartAutorefresh()">
+    <option value="5">5s</option>
+    <option value="10" selected>10s</option>
+    <option value="30">30s</option>
+    <option value="60">60s</option>
+  </select>
+  <span id="autorefresh-status" style="color:#888780">last updated just now</span>
+</div>
+
+{% if not node.enabled %}
+<div class="card"><div style="padding:16px;color:#a32d2d">This node is disabled -- live metrics, live calls, and registrations can't be fetched. Enable it to see live data here.</div></div>
+{% endif %}
+
+<div class="metrics" id="dash-live-metrics">
+  <div class="metric"><div class="metric-label">Kamailio</div><div class="metric-val" style="font-size:14px" id="m-kam-status">{{ (kam_status or 'unknown')|capitalize }}</div></div>
+  <div class="metric"><div class="metric-label">RTPEngine</div><div class="metric-val" style="font-size:14px" id="m-rtp-status">{{ (rtp_status or 'unknown')|capitalize }}</div></div>
+  <div class="metric"><div class="metric-label">SIP Trace</div><div class="metric-val" style="font-size:14px" id="m-siptrace-status">{{ siptrace_status or 'unknown' }}</div></div>
+  <div class="metric"><div class="metric-label">Load (1m)</div><div class="metric-val" id="m-load">{{ health.cpu_load_1m if health and health.cpu_load_1m is not none else '-' }}</div></div>
+  <div class="metric"><div class="metric-label">RAM used</div><div class="metric-val" id="m-ram">{{ (health.ram_used_mb ~ '/' ~ health.ram_total_mb ~ ' MB') if health else '-' }}</div></div>
+  <div class="metric"><div class="metric-label">Disk</div><div class="metric-val" id="m-disk">{{ (health.disk_used_pct ~ '%') if health else '-' }}</div></div>
+  <div class="metric"><div class="metric-label">Trunks</div><div class="metric-val" id="m-trunks">{{ live_metrics.trunk_total if live_metrics.trunk_total is not none else '-' }}</div>
+    <div style="font-size:10px;color:#888780" id="m-trunks-sub">{{ live_metrics.trunk_up if live_metrics.trunk_up is not none else '-' }} up / {{ live_metrics.trunk_down if live_metrics.trunk_down is not none else '-' }} down</div></div>
+  <div class="metric"><div class="metric-label">Domains</div><div class="metric-val" id="m-domains">{{ live_metrics.domain_count if live_metrics.domain_count is not none else '-' }}</div></div>
+  <div class="metric"><div class="metric-label">Users</div><div class="metric-val" id="m-users">{{ live_metrics.user_total if live_metrics.user_total is not none else '-' }}</div>
+    <div style="font-size:10px;color:#888780" id="m-users-sub">{{ live_metrics.user_registered if live_metrics.user_registered is not none else '-' }} registered</div></div>
+  <div class="metric"><div class="metric-label">DIDs</div><div class="metric-val" id="m-dids">{{ live_metrics.did_count if live_metrics.did_count is not none else '-' }}</div></div>
+</div>
+<div style="font-size:11px;color:#888780;margin:-8px 0 14px">Kamailio/RTPEngine/SIP Trace/Load/RAM/Disk and Trunks/Domains/Users/DIDs all read live from this node itself (SSH/Kamailio dispatcher/usrloc/htables) -- not the Manager's database.</div>
+
+<div class="card"><div class="card-head" style="display:flex;justify-content:space-between;align-items:center"><span class="card-title">Call stats <span class="live-age" style="font-size:11px;color:#888780;font-weight:400">updated just now</span></span>
+  <button type="button" class="btn btn-sm" onclick="refreshDashboard()"><i class="ti ti-refresh"></i> Refresh</button></div>
+<div style="padding:12px 16px;overflow-x:auto">
+<table id="dash-call-stats"><thead><tr>
+  <th></th><th>Total</th><th>Answered</th><th>Unanswered</th><th>Failed Temp.</th><th>Failed Perm.</th><th>Unrouted</th><th>Rejected</th>
+</tr></thead>
+<tbody>
+  <tr><td><b>Today</b></td>
+    <td id="cs-today-total">{{ call_stats.today.total }}</td><td id="cs-today-answered">{{ call_stats.today.answered }}</td>
+    <td id="cs-today-unanswered">{{ call_stats.today.unanswered }}</td><td id="cs-today-failed_temp">{{ call_stats.today.failed_temp }}</td>
+    <td id="cs-today-failed_perm">{{ call_stats.today.failed_perm }}</td><td id="cs-today-unrouted">{{ call_stats.today.unrouted }}</td>
+    <td id="cs-today-rejected">{{ call_stats.today.rejected }}</td></tr>
+  <tr><td><b>Last hour</b></td>
+    <td id="cs-hour-total">{{ call_stats.hour.total }}</td><td id="cs-hour-answered">{{ call_stats.hour.answered }}</td>
+    <td id="cs-hour-unanswered">{{ call_stats.hour.unanswered }}</td><td id="cs-hour-failed_temp">{{ call_stats.hour.failed_temp }}</td>
+    <td id="cs-hour-failed_perm">{{ call_stats.hour.failed_perm }}</td><td id="cs-hour-unrouted">{{ call_stats.hour.unrouted }}</td>
+    <td id="cs-hour-rejected">{{ call_stats.hour.rejected }}</td></tr>
+  <tr><td><b>Last 5 min</b></td>
+    <td id="cs-min5-total">{{ call_stats.min5.total }}</td><td id="cs-min5-answered">{{ call_stats.min5.answered }}</td>
+    <td id="cs-min5-unanswered">{{ call_stats.min5.unanswered }}</td><td id="cs-min5-failed_temp">{{ call_stats.min5.failed_temp }}</td>
+    <td id="cs-min5-failed_perm">{{ call_stats.min5.failed_perm }}</td><td id="cs-min5-unrouted">{{ call_stats.min5.unrouted }}</td>
+    <td id="cs-min5-rejected">{{ call_stats.min5.rejected }}</td></tr>
+</tbody></table>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Alerts</span></div>
+{% if alerts %}
+<table><thead><tr><th>Type</th><th>Entity</th><th>Message</th><th>Started</th></tr></thead>
+<tbody>{% for a in alerts %}<tr>
+  <td><span class="badge badge-warn">{{ a.alert_type }}</span></td>
+  <td>{{ a.entity_type }}: {{ a.entity_name }}</td>
+  <td>{{ a.message }}</td>
+  <td class="mono" style="font-size:11px">{{ a.started_at }}</td>
+</tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty">No active alerts for this node.</div>{% endif %}
+</div>
+
+<div class="card"><div class="card-head" style="display:flex;justify-content:space-between;align-items:center"><span class="card-title">Live calls <span id="lc-count" class="badge badge-info">{{ live_calls|length }}</span> <span class="live-age" style="font-size:11px;color:#888780;font-weight:400">updated just now</span></span>
+  <span><button type="button" class="btn btn-sm" onclick="refreshDashboard()"><i class="ti ti-refresh"></i> Refresh</button>
+  <button type="button" class="btn btn-sm" onclick="exportTableCsv('dash-livecalls-table', 'live-calls.csv')">Export CSV</button></span></div>
+<div style="padding:12px 16px 0"><input id="lc-search" placeholder="Search..." style="width:240px" oninput="filterTable('dash-livecalls-table', this.value)"></div>
+<div style="padding:0 16px 16px;overflow-x:auto">
+<table id="dash-livecalls-table"><thead><tr>
+  <th data-sort="text">Source</th><th data-sort="text">Destination</th>
+  <th data-sort="text">Original Called</th><th data-sort="text">Original Calling</th>
+  <th data-sort="text">Effective Called</th><th data-sort="text">Effective Calling</th>
+  <th data-sort="text">Call ID</th>
+  <th data-sort="num">Duration</th><th data-sort="text">Codec</th><th></th>
+</tr></thead>
+<tbody id="dash-livecalls-tbody">
+{% include "_live_calls_rows.html" %}
+</tbody></table>
+{% if not live_calls %}<div class="empty" style="padding:16px 0">No live calls right now{{ '' if node.enabled else ' (node disabled)' }}.</div>{% endif %}
+</div></div>
+
+<div class="card"><div class="card-head" style="display:flex;justify-content:space-between;align-items:center"><span class="card-title">Inbound registrations <span id="inbound-count" class="badge badge-info">{{ inbound_registrations|length }}</span> <span class="live-age" style="font-size:11px;color:#888780;font-weight:400">updated just now</span></span>
+  <span><button type="button" class="btn btn-sm" onclick="refreshDashboard()"><i class="ti ti-refresh"></i> Refresh</button>
+  <button type="button" class="btn btn-sm" onclick="exportTableCsv('dash-inbound-table', 'inbound-registrations.csv')">Export CSV</button></span></div>
+<div style="padding:12px 16px 0"><input id="inbound-search" placeholder="Search..." style="width:240px" oninput="filterTable('dash-inbound-table', this.value)"></div>
+<div style="padding:0 16px 16px;overflow-x:auto">
+<table id="dash-inbound-table"><thead><tr>
+  <th data-sort="text">AoR</th><th data-sort="text">Contact</th><th data-sort="text">Expires</th><th data-sort="text">User-Agent</th><th data-sort="text">Socket</th>
+</tr></thead>
+<tbody id="dash-inbound-tbody">
+{% include "_inbound_regs_rows.html" %}
+</tbody></table>
+{% if not inbound_registrations %}<div class="empty" style="padding:16px 0">No inbound registrations right now{{ '' if node.enabled else ' (node disabled)' }}.</div>{% endif %}
+</div></div>
+
+<div class="card"><div class="card-head" style="display:flex;justify-content:space-between;align-items:center"><span class="card-title">Outbound registrations <span id="outbound-count" class="badge badge-info">{{ outbound_registrations|length }}</span> <span class="live-age" style="font-size:11px;color:#888780;font-weight:400">updated just now</span></span>
+  <span><button type="button" class="btn btn-sm" onclick="refreshDashboard()"><i class="ti ti-refresh"></i> Refresh</button>
+  <button type="button" class="btn btn-sm" onclick="exportTableCsv('dash-outbound-table', 'outbound-registrations.csv')">Export CSV</button></span></div>
+<div style="padding:12px 16px 0"><input id="outbound-search" placeholder="Search..." style="width:240px" oninput="filterTable('dash-outbound-table', this.value)"></div>
+<div style="padding:0 16px 16px;overflow-x:auto">
+<table id="dash-outbound-table"><thead><tr>
+  <th data-sort="text">Trunk (l_uuid)</th><th data-sort="text">Registers as</th><th data-sort="text">To</th><th data-sort="text">Realm</th><th data-sort="text">Status</th>
+</tr></thead>
+<tbody id="dash-outbound-tbody">
+{% include "_outbound_regs_rows.html" %}
+</tbody></table>
+{% if not outbound_registrations %}<div class="empty" style="padding:16px 0">No outbound registrations configured{{ '' if node.enabled else ' (node disabled)' }}.</div>{% endif %}
+</div></div>
+
+<div id="call-detail-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:100;align-items:center;justify-content:center" onclick="if(event.target===this) this.style.display='none'">
+  <div style="background:#fff;border-radius:8px;max-width:600px;width:90%;max-height:80vh;overflow-y:auto;padding:20px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <b>Call detail</b>
+      <button type="button" class="btn btn-sm" onclick="document.getElementById('call-detail-modal').style.display='none'">Close</button>
+    </div>
+    <table id="call-detail-table" style="width:100%"></table>
+  </div>
+</div>
+
+<script>
+let autorefreshTimer = null;
+
+function toggleAutorefresh() {
+  document.getElementById('autorefresh-toggle').checked ? restartAutorefresh() : stopAutorefresh();
+}
+function restartAutorefresh() {
+  stopAutorefresh();
+  if (!document.getElementById('autorefresh-toggle').checked) return;
+  const seconds = parseInt(document.getElementById('autorefresh-interval').value, 10);
+  autorefreshTimer = setInterval(refreshDashboard, seconds * 1000);
+}
+function stopAutorefresh() {
+  if (autorefreshTimer) { clearInterval(autorefreshTimer); autorefreshTimer = null; }
+}
+
+async function refreshDashboard() {
+  try {
+    const res = await fetch('{{ url_for("web.node_dashboard_refresh", node_id=node.id) }}', {headers: {'Accept': 'application/json'}});
+    const data = await res.json();
+    updateMetrics(data.live_metrics || {}, data);
+    updateCallStats(data.call_stats || {});
+
+    const setHtml = (id, html) => { const el = document.getElementById(id); if (el && html !== undefined) el.innerHTML = html; };
+    setHtml('dash-livecalls-tbody', data.live_calls_html);
+    setHtml('dash-inbound-tbody', data.inbound_registrations_html);
+    setHtml('dash-outbound-tbody', data.outbound_registrations_html);
+
+    const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+    setText('lc-count', (data.live_calls || []).length);
+    setText('inbound-count', (data.inbound_registrations || []).length);
+    setText('outbound-count', (data.outbound_registrations || []).length);
+
+    markLiveAgesUpdated();
+
+    document.getElementById('autorefresh-status').textContent = 'last updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('autorefresh-status').textContent = 'refresh failed';
+  }
+}
+
+function markLiveAgesUpdated() {
+  // Date.now() -- purely client-side, an absolute millisecond
+  // timestamp with no timezone involved at all. Deliberately NOT
+  // comparing a server-supplied timestamp against the browser's own
+  // clock: a naive server timestamp (no UTC marker) gets parsed by
+  // the browser as if it were in the BROWSER's own local timezone,
+  // producing a constant wrong offset for anyone not in the same
+  // timezone as the server (confirmed: this is exactly what produced
+  // a fixed "10h ago" for a UK server viewed from Australia). Tracking
+  // purely client-side sidesteps the whole bug class rather than
+  // patching the timezone marker and hoping both sides agree.
+  const now = Date.now();
+  document.querySelectorAll('.live-age').forEach(el => el.dataset.updatedAt = now);
+  tickLiveAges();
+}
+
+function tickLiveAges() {
+  const now = Date.now();
+  document.querySelectorAll('.live-age').forEach(el => {
+    if (!el.dataset.updatedAt) return;
+    const secs = Math.max(0, Math.floor((now - Number(el.dataset.updatedAt)) / 1000));
+    let label;
+    if (secs < 5) label = 'updated just now';
+    else if (secs < 60) label = `updated ${secs}s ago`;
+    else if (secs < 3600) label = `updated ${Math.floor(secs / 60)}m ago`;
+    else label = `updated ${Math.floor(secs / 3600)}h ago`;
+    el.textContent = label;
+  });
+}
+setInterval(tickLiveAges, 1000);
+markLiveAgesUpdated();
+
+
+function updateMetrics(m, full) {
+  const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = (val === null || val === undefined) ? '-' : val; };
+  set('m-trunks', m.trunk_total); set('m-domains', m.domain_count); set('m-users', m.user_total); set('m-dids', m.did_count);
+  const sub = document.getElementById('m-trunks-sub');
+  if (sub) sub.textContent = (m.trunk_up ?? '-') + ' up / ' + (m.trunk_down ?? '-') + ' down';
+  const usub = document.getElementById('m-users-sub');
+  if (usub) usub.textContent = (m.user_registered ?? '-') + ' registered';
+  if (full) {
+    const cap = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : 'Unknown';
+    set('m-kam-status', cap(full.kam_status));
+    set('m-rtp-status', cap(full.rtp_status));
+    set('m-siptrace-status', full.siptrace_status || 'unknown');
+    const h = full.health;
+    set('m-load', h && h.cpu_load_1m !== null && h.cpu_load_1m !== undefined ? h.cpu_load_1m : '-');
+    set('m-ram', h ? (h.ram_used_mb + '/' + h.ram_total_mb + ' MB') : '-');
+    set('m-disk', h ? (h.disk_used_pct + '%') : '-');
+  }
+}
+
+function updateCallStats(cs) {
+  for (const win of ['today', 'hour', 'min5']) {
+    const w = cs[win] || {};
+    for (const field of ['total', 'answered', 'unanswered', 'failed_temp', 'failed_perm', 'unrouted', 'rejected']) {
+      const el = document.getElementById(`cs-${win}-${field}`);
+      if (el) el.textContent = w[field] ?? 0;
+    }
+  }
+}
+
+function filterTable(tableId, query) {
+  const q = query.trim().toLowerCase();
+  const rows = document.querySelectorAll(`#${tableId} tbody tr`);
+  let visible = 0;
+  rows.forEach(row => {
+    const match = !q || row.textContent.toLowerCase().includes(q);
+    row.style.display = match ? '' : 'none';
+    if (match) visible++;
+  });
+}
+
+function exportTableCsv(tableId, filename) {
+  const table = document.getElementById(tableId);
+  const rows = [...table.querySelectorAll('tr')].filter(r => r.style.display !== 'none');
+  const csv = rows.map(row => [...row.children].map(cell => {
+    const text = (cell.innerText || '').replace(/"/g, '""');
+    return `"${text}"`;
+  }).join(',')).join('\n');
+  const blob = new Blob([csv], {type: 'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+}
+
+function showCallDetail(call) {
+  const rows = [
+    ['Call-ID', call.call_id], ['State', call.state], ['Duration', call.duration + 's'],
+    ['Negotiated codec', call.negotiated_codec || '-'],
+    ['From URI (routed)', call.from_uri], ['To URI (routed)', call.to_uri],
+    ['Original called', (call.variables || {}).original_called || '-'],
+    ['Original calling', (call.variables || {}).original_calling || '-'],
+    ['Caller tag', (call.caller || {}).tag || '-'], ['Caller contact', (call.caller || {}).contact || '-'], ['Caller socket', (call.caller || {}).socket || '-'],
+    ['Callee tag', (call.callee || {}).tag || '-'], ['Callee contact', (call.callee || {}).contact || '-'], ['Callee socket', (call.callee || {}).socket || '-'],
+  ];
+  for (const [k, v] of Object.entries(call.variables || {})) {
+    if (!['original_called', 'original_calling'].includes(k)) rows.push([k, v]);
+  }
+  document.getElementById('call-detail-table').innerHTML = rows.map(([k, v]) =>
+    `<tr><td style="font-weight:500;padding:5px 14px 5px 0;white-space:nowrap;vertical-align:top">${k}</td><td style="padding:5px 0;word-break:break-all">${v}</td></tr>`
+  ).join('');
+  document.getElementById('call-detail-modal').style.display = 'flex';
+}
+
+restartAutorefresh();
+</script>
+{% endblock %}

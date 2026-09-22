@@ -1,0 +1,21 @@
+{% set sync = sync_status(node.id) %}
+{% if sync.pending %}
+{% set entity_labels = {
+  'trunk': 'Trunk', 'gateway_group': 'Gateway Group', 'routing_profile': 'Routing Profile',
+  'routing_rule': 'Routing Rule', 'domain': 'Domain', 'subscriber': 'Subscriber',
+  'acl': 'ACL', 'sip_profile': 'SIP Profile', 'rate_limit_pipe': 'Rate Limit'
+} %}
+<div class="card" style="border:1.5px solid #b8860b;background:#fdf6e3">
+  <div class="card-head" style="border-bottom-color:#f0e0b0"><span class="card-title" style="color:#8a6600;font-weight:600"><i class="ti ti-clock-exclamation"></i> Sync pending ({{ sync.changes|length }} change{{ 's' if sync.changes|length != 1 }})</span></div>
+  <div style="padding:16px">
+    <p style="font-size:12px;color:#5f5e5a;margin:0 0 10px">These changes haven't been picked up by this node yet. The scheduled sync runs automatically every minute, or push it now:</p>
+    <ul style="margin:0 0 12px 18px;font-size:13px">
+      {% for c in sync.changes[:10] %}
+      <li>{{ entity_labels.get(c.entity_type, c.entity_type) }} {{ c.action }} <span style="color:#888780;font-size:11px">({{ c.changed_at|time_ago }})</span></li>
+      {% endfor %}
+      {% if sync.changes|length > 10 %}<li style="color:#888780">...and {{ sync.changes|length - 10 }} more</li>{% endif %}
+    </ul>
+    <a href="/nodes/{{ node.id }}/sync?return_url={{ request.path|urlencode }}" class="btn" style="background:#b8860b;color:#fff;border-color:#b8860b"><i class="ti ti-refresh"></i> Sync now</a>
+  </div>
+</div>
+{% endif %}

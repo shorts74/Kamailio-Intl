@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="20">
+<title>{{ title }} — Board</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #1a1a1a; color: #f0f0ec; font-family: -apple-system, "Segoe UI", sans-serif; padding: 40px; min-height: 100vh; }
+  h1 { font-size: 42px; font-weight: 500; margin-bottom: 8px; }
+  .subtitle { color: #888; font-size: 18px; margin-bottom: 32px; }
+  .status-banner { display: flex; align-items: center; gap: 16px; padding: 24px 32px; border-radius: 12px; margin-bottom: 32px; font-size: 28px; font-weight: 500; }
+  .status-ok { background: #1e3a1e; color: #7fd67f; }
+  .status-warn { background: #3a3319; color: #e0c060; }
+  .dot { width: 20px; height: 20px; border-radius: 50%; background: currentColor; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-bottom: 32px; }
+  .metric { background: #262626; border-radius: 12px; padding: 24px; }
+  .metric-label { color: #888; font-size: 16px; margin-bottom: 8px; }
+  .metric-val { font-size: 48px; font-weight: 600; }
+  .alerts { background: #262626; border-radius: 12px; padding: 24px; }
+  .alert-row { padding: 16px 0; border-bottom: 1px solid #383838; font-size: 20px; }
+  .alert-row:last-child { border-bottom: none; }
+  .alert-type { display: inline-block; background: #4a1e1e; color: #e08080; padding: 4px 12px; border-radius: 6px; font-size: 14px; margin-right: 12px; text-transform: uppercase; }
+  .nodes-list { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 24px; }
+  .node-pill { background: #262626; border-radius: 8px; padding: 12px 20px; font-size: 18px; display: flex; align-items: center; gap: 10px; }
+  .empty { color: #666; font-size: 20px; padding: 24px 0; }
+</style>
+</head>
+<body>
+  <h1>{{ title }}</h1>
+  <div class="subtitle">Live status — auto-refreshes every 20s</div>
+
+  {% if active_alerts %}
+  <div class="status-banner status-warn"><div class="dot"></div> {{ active_alerts|length }} active alert{{ 's' if active_alerts|length != 1 }}</div>
+  {% else %}
+  <div class="status-banner status-ok"><div class="dot"></div> All systems normal</div>
+  {% endif %}
+
+  <div class="metrics">
+    <div class="metric"><div class="metric-label">Trunks connected</div><div class="metric-val">{{ trunk_up }}/{{ trunk_total }}</div></div>
+    <div class="metric"><div class="metric-label">Trunks down</div><div class="metric-val" style="{{ 'color:#e08080' if trunk_down > 0 }}">{{ trunk_down }}</div></div>
+    <div class="metric"><div class="metric-label">Calls today</div><div class="metric-val">{{ calls_today }}</div></div>
+    {% if live_metrics %}
+    <div class="metric"><div class="metric-label">Domains</div><div class="metric-val">{{ live_metrics.domain_count if live_metrics.domain_count is not none else '-' }}</div></div>
+    <div class="metric"><div class="metric-label">Users registered</div><div class="metric-val">{{ live_metrics.user_registered if live_metrics.user_registered is not none else '-' }}</div></div>
+    <div class="metric"><div class="metric-label">DIDs</div><div class="metric-val">{{ live_metrics.did_count if live_metrics.did_count is not none else '-' }}</div></div>
+    {% endif %}
+  </div>
+
+  {% if call_stats %}
+  <div class="alerts" style="margin-bottom:32px">
+    <div style="font-size:20px;font-weight:500;margin-bottom:16px;color:#ccc">Call stats</div>
+    <table style="width:100%;border-collapse:collapse;font-size:18px">
+      <tr style="color:#888"><td></td><td style="padding:8px 16px">Total</td><td style="padding:8px 16px">Answered</td><td style="padding:8px 16px">Failed</td><td style="padding:8px 16px">Unrouted</td><td style="padding:8px 16px">Rejected</td></tr>
+      <tr style="border-top:1px solid #383838"><td style="padding:8px 16px;color:#888">Today</td><td style="padding:8px 16px">{{ call_stats.today.total }}</td><td style="padding:8px 16px">{{ call_stats.today.answered }}</td><td style="padding:8px 16px">{{ call_stats.today.failed_temp + call_stats.today.failed_perm }}</td><td style="padding:8px 16px">{{ call_stats.today.unrouted }}</td><td style="padding:8px 16px">{{ call_stats.today.rejected }}</td></tr>
+      <tr style="border-top:1px solid #383838"><td style="padding:8px 16px;color:#888">Last hour</td><td style="padding:8px 16px">{{ call_stats.hour.total }}</td><td style="padding:8px 16px">{{ call_stats.hour.answered }}</td><td style="padding:8px 16px">{{ call_stats.hour.failed_temp + call_stats.hour.failed_perm }}</td><td style="padding:8px 16px">{{ call_stats.hour.unrouted }}</td><td style="padding:8px 16px">{{ call_stats.hour.rejected }}</td></tr>
+      <tr style="border-top:1px solid #383838"><td style="padding:8px 16px;color:#888">Last 5 min</td><td style="padding:8px 16px">{{ call_stats.min5.total }}</td><td style="padding:8px 16px">{{ call_stats.min5.answered }}</td><td style="padding:8px 16px">{{ call_stats.min5.failed_temp + call_stats.min5.failed_perm }}</td><td style="padding:8px 16px">{{ call_stats.min5.unrouted }}</td><td style="padding:8px 16px">{{ call_stats.min5.rejected }}</td></tr>
+    </table>
+  </div>
+  {% endif %}
+
+  <div class="alerts">
+    {% if active_alerts %}
+      {% for a in active_alerts %}
+      <div class="alert-row"><span class="alert-type">{{ a.alert_type.replace('_', ' ') }}</span>{{ a.message }}</div>
+      {% endfor %}
+    {% else %}
+      <div class="empty">No active alerts.</div>
+    {% endif %}
+  </div>
+
+  {% if node_id is none %}
+  <div class="nodes-list">
+    {% for n in nodes %}
+    <div class="node-pill">
+      <div class="dot" style="width:12px;height:12px;color:{{ '#7fd67f' if n.enabled else '#666' }}"></div>
+      {{ n.name }}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</body>
+</html>

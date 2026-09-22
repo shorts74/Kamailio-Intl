@@ -1,0 +1,328 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+{% include "_node_tabs.html" %}
+{% include "_pending_banner.html" %}
+
+<div class="card"><div class="card-head"><span class="card-title"><i class="ti ti-key"></i> Loaded SSH keys</span></div>
+<div style="padding:16px">
+  <p style="font-size:11px;color:#888780;margin:0 0 10px">Read-only summary -- push, test, and rotate keys from this node's own <a href="/nodes/{{ node.id }}/settings">Settings</a> page.</p>
+  {% if loaded_keys %}
+  <table><thead><tr><th>Key</th><th>Pushed</th><th>Status</th></tr></thead>
+  <tbody>{% for k in loaded_keys %}<tr>
+    <td><b>{{ k.key_name }}</b></td>
+    <td style="font-size:11px">{{ k.pushed_at }}</td>
+    <td>{% if k.confirmed_working %}<span class="badge badge-ok">Confirmed working</span>{% else %}<span class="badge badge-warn">Pushed, not yet tested</span>{% endif %}</td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No secondary SSH keys pushed to this node yet.</div>{% endif %}
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title"><i class="ti ti-certificate"></i> Loaded certificates</span></div>
+<div style="padding:16px">
+  <p style="font-size:11px;color:#888780;margin:0 0 10px">Certificates actually deployed on this node's disk, tracked separately from the <a href="/certificates">Certificates</a> registry. Manage/rotate certs from that page -- this is a read-mostly view with cleanup for stale entries.</p>
+  {% if loaded_certs %}
+  <table><thead><tr><th>Certificate</th><th>Deployed</th><th>Status</th><th></th></tr></thead>
+  <tbody>{% for c in loaded_certs %}<tr>
+    <td><b>{{ c.cert_name }}</b></td>
+    <td style="font-size:11px" class="mono">{{ c.remote_cert_path }}</td>
+    <td>{% if c.still_in_use %}<span class="badge badge-ok">In use</span>{% else %}<span class="badge badge-warn">Stale -- not referenced</span>{% endif %}</td>
+    <td>{% if not c.still_in_use %}<a href="/nodes/{{ node.id }}/certificates/{{ c.certificate_id }}/remove" class="btn btn-sm btn-danger" onclick="return confirm('Remove {{ c.cert_name }} from this node\'s tracked list?')">Remove</a>{% endif %}</td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No certificates deployed on this node yet.</div>{% endif %}
+</div></div>
+
+<div class="card">
+  <div class="card-head"><span class="card-title"><i class="ti ti-lock-access"></i> SSH access restriction</span></div>
+  <div style="padding:16px">
+    <p style="font-size:11px;color:#888780;margin:0 0 10px">
+      By default, SSH (port 22) is open to any source IP -- restrict it here to specific IPs/CIDRs only. Applied live with the same auto-rollback safety net as the firewall rules below: if the change makes this node unreachable, it reverts on its own within 90s, no console access needed. The Manager's own control-plane connection is separately, unconditionally whitelisted for all ports either way, so this can never lock the Manager itself out -- only a human connecting directly needs to be in the list below.
+    </p>
+    {% if ssh_allowed_cidrs is none %}
+    <div class="empty">Could not read this node's current SSH restriction (node unreachable) -- showing the form below regardless; submitting will attempt to apply and verify live.</div>
+    {% elif ssh_allowed_cidrs %}
+    <div style="margin-bottom:10px"><span class="badge badge-ok">Restricted</span> <span style="font-size:11px;color:#888780">to {{ ssh_allowed_cidrs|length }} source{{ 's' if ssh_allowed_cidrs|length != 1 }}</span></div>
+    {% else %}
+    <div style="margin-bottom:10px"><span class="badge badge-warn">Open</span> <span style="font-size:11px;color:#888780">SSH currently allowed from any source (0.0.0.0/0)</span></div>
+    {% endif %}
+    <form method="POST" action="/nodes/{{ node.id }}/security/ssh-allowed/update" onsubmit="return confirm('Update SSH-allowed sources on {{ node.name }}? This is applied live and verified -- if it locks the node out, it auto-reverts within 90s.')">
+      <div class="fg"><label class="fl">Allowed source IPs/CIDRs, one per line {{ help_icon("SSH allowed sources", "Leave completely empty to revert to unrestricted (0.0.0.0/0) -- the original, default behavior. Each line is validated as a real CIDR before anything is applied.") }}</label>
+        <textarea name="ssh_allowed_cidrs" rows="4" style="width:100%;max-width:400px;font-family:monospace;font-size:12px" placeholder="e.g.&#10;203.0.113.10/32&#10;198.51.100.0/24">{{ ssh_allowed_cidrs|join('\n') if ssh_allowed_cidrs }}</textarea>
+      </div>
+      <button type="submit" class="btn btn-primary" style="margin-top:8px"><i class="ti ti-device-floppy"></i> Update SSH access</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="card-title"><i class="ti ti-shield"></i> Firewall rules</span>
+    <a href="/security/firewall/apply/{{ node.id }}" class="btn btn-sm" onclick="return confirm('Apply current firewall rules to {{ node.name }}? Auto-rollback protects against lockout if the node becomes unreachable.')"><i class="ti ti-refresh"></i> Apply to this node</a></div>
+  <p style="padding:0 16px;font-size:11px;color:#888780">Shows this node's own rules plus anything scoped to all nodes.</p>
+  <div data-live-region="rules_q">
+  <div style="padding:12px 16px 0">
+  {% call toolbar(page=rules_page, total_pages=rules_total_pages, total=rules_total, page_param="rules_page", q_param="rules_q") %}
+    <div class="fg" style="margin:0"><label class="fl">Search port group</label><input name="rules_q" value="{{ request.args.get('rules_q', '') }}" data-live-search data-page-param="rules_page"></div>
+  {% endcall %}
+  </div>
+  {% if rules %}
+  <table><thead><tr><th>Scope</th><th>Group</th><th>Port(s)</th><th>Protocol</th><th>Source</th><th>Action</th><th></th></tr></thead>
+  <tbody>{% for r in rules %}<tr>
+    <td>{{ r.node_name or 'All nodes' }}</td>
+    <td><span class="badge badge-info">{{ r.port_group }}</span></td>
+    <td class="mono">{{ r.port_start }}{% if r.port_end != r.port_start %}-{{ r.port_end }}{% endif %}</td>
+    <td>{{ r.protocol }}</td><td class="mono">{{ r.source_cidr }}</td>
+    <td><span class="badge {{ 'badge-ok' if r.action=='allow' else 'badge-bad' }}">{{ r.action }}</span></td>
+    <td><a href="/security/firewall/{{ r.id }}/delete?return_url=/nodes/{{ node.id }}/security" class="btn btn-sm btn-danger"><i class="ti ti-trash"></i></a></td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No firewall rules apply to this node yet.</div>{% endif %}
+  </div>
+  <form method="POST" action="/security/firewall/add" class="add-form">
+    <input type="hidden" name="return_url" value="/nodes/{{ node.id }}/security">
+    <input type="hidden" name="scope_node_id" value="{{ node.id }}">
+    <div class="fg" style="width:110px"><label class="fl">Port group</label><select name="port_group"><option value="sip">SIP</option><option value="rtp">RTP</option><option value="ssh">SSH</option><option value="snmp">SNMP</option><option value="custom">Custom</option></select></div>
+    <div class="fg" style="width:90px"><label class="fl">Port start</label><input type="number" name="port_start" required></div>
+    <div class="fg" style="width:90px"><label class="fl">Port end</label><input type="number" name="port_end"></div>
+    <div class="fg" style="width:90px"><label class="fl">Protocol</label><select name="protocol"><option value="udp">UDP</option><option value="tcp">TCP</option></select></div>
+    <div class="fg" style="width:150px"><label class="fl">Source CIDR</label><input name="source_cidr" value="0.0.0.0/0"></div>
+    <div class="fg" style="width:100px"><label class="fl">Action</label><select name="action"><option value="allow">Allow</option><option value="deny">Deny</option></select></div>
+    <button type="submit" class="btn btn-primary"><i class="ti ti-plus"></i> Add rule for this node</button>
+  </form>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="card-title"><i class="ti ti-list"></i> Whitelist / blacklist</span></div>
+  <div data-live-region="lists_q">
+  <div style="padding:12px 16px 0">
+  {% call toolbar(page=lists_page, total_pages=lists_total_pages, total=lists_total, page_param="lists_page", q_param="lists_q") %}
+    <div class="fg" style="margin:0"><label class="fl">Search CIDR</label><input name="lists_q" value="{{ request.args.get('lists_q', '') }}" data-live-search data-page-param="lists_page"></div>
+  {% endcall %}
+  </div>
+  {% if lists %}
+  <table><thead><tr><th>Type</th><th>CIDR</th><th>Scope</th><th>Reason</th><th></th></tr></thead>
+  <tbody>{% for l in lists %}<tr>
+    <td><span class="badge {{ 'badge-ok' if l.list_type=='whitelist' else 'badge-bad' }}">{{ l.list_type }}</span></td>
+    <td class="mono">{{ l.cidr }}</td><td>{{ l.node_name or 'All nodes' }}</td><td>{{ l.reason or '-' }}</td>
+    <td><a href="/security/ip-lists/{{ l.id }}/delete?return_url=/nodes/{{ node.id }}/security" class="btn btn-sm btn-danger"><i class="ti ti-trash"></i></a></td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No whitelist/blacklist entries apply to this node yet.</div>{% endif %}
+  </div>
+  <form method="POST" action="/security/ip-lists/add" class="add-form">
+    <input type="hidden" name="return_url" value="/nodes/{{ node.id }}/security">
+    <input type="hidden" name="scope_node_id" value="{{ node.id }}">
+    <div class="fg" style="width:120px"><label class="fl">Type</label><select name="list_type"><option value="whitelist">Whitelist</option><option value="blacklist">Blacklist</option></select></div>
+    <div class="fg" style="width:150px"><label class="fl">CIDR</label><input name="cidr" placeholder="1.2.3.4/32" required></div>
+    <div class="fg" style="width:200px"><label class="fl">Reason</label><input name="reason"></div>
+    <button type="submit" class="btn btn-primary"><i class="ti ti-plus"></i> Add for this node</button>
+  </form>
+
+  <div style="border-top:0.5px solid #e8e7e1;margin-top:16px;padding:16px 16px 0">
+    <div style="font-size:12px;font-weight:600;color:#5f5e5a;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">Configured sources (ACL / Trust CIDR)</div>
+    <p style="font-size:11px;color:#888780;margin:0 0 10px">Read live from this node's own firewall_allowlist -- source IPs/CIDRs derived from each trunk/domain/subscriber's own ACL entries and Trust CIDR settings, not manually added here. Manage these from the Trunks/Domains/Subscribers pages, not this list.</p>
+    {% if dynamic_fw_sources.error %}
+    <div class="empty">{{ dynamic_fw_sources.error }}</div>
+    {% elif dynamic_fw_sources.configured %}
+    {% for cat in ['Trunk', 'Domain', 'User', 'Other'] %}
+    {% set cat_entries = dynamic_fw_sources.configured|selectattr('category', 'equalto', cat)|list %}
+    {% if cat_entries %}
+    <div style="font-size:11px;font-weight:600;color:#5f5e5a;margin:10px 0 4px">{{ cat }}</div>
+    <table><thead><tr><th>Identity</th><th>IP / CIDR</th><th>Port</th><th>Protocol</th></tr></thead>
+    <tbody>{% for e in cat_entries %}<tr>
+      <td>{{ e.identity }}</td><td class="mono">{{ e.ip_addr }}</td><td>{{ e.port }}</td><td>{{ e.protocol }}</td>
+    </tr>{% endfor %}</tbody></table>
+    {% endif %}
+    {% endfor %}
+    {% else %}<div class="empty">No ACL/Trust-CIDR-derived sources configured for this node yet.</div>{% endif %}
+  </div>
+
+  <div style="border-top:0.5px solid #e8e7e1;margin-top:16px;padding:16px">
+    <div style="font-size:12px;font-weight:600;color:#5f5e5a;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">Dynamic exemptions (live, registration-derived)</div>
+    <p style="font-size:11px;color:#888780;margin:0 0 10px">Read live from this node's own kernel firewall state (ipset), not SQLite -- these entries exist only as long as the underlying trunk/subscriber keeps registering, and auto-expire on their own if it stops. "Resolved for" is populated straight from Kamailio's own REGISTER/OPTIONS-ping resolution (not a separate lookup here) for trunks configured by hostname -- this is how you see which IP a given FQDN trunk currently resolves to.</p>
+    {% if dynamic_fw_sources.dynamic %}
+    <table><thead><tr><th>Source</th><th>IP</th><th>Resolved for</th><th>Remaining</th></tr></thead>
+    <tbody>{% for e in dynamic_fw_sources.dynamic %}<tr>
+      <td>{{ e.source }}</td><td class="mono">{{ e.ip_addr }}</td><td>{{ e.trunk_name or "—" }}</td><td>{{ e.ttl_remaining }}</td>
+    </tr>{% endfor %}</tbody></table>
+    {% else %}<div class="empty">No dynamic exemptions active on this node right now (no resolved trunks or active registrations, or the node is unreachable).</div>{% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="card-title"><i class="ti ti-hand-stop"></i> Manual ban / unban</span></div>
+  <div style="padding:16px;display:flex;gap:8px;flex-wrap:wrap">
+    <form method="POST" action="/security/fail2ban/{{ node.id }}/unban" style="display:flex;gap:4px">
+      <input type="hidden" name="return_url" value="/nodes/{{ node.id }}/security">
+      <input name="ip_addr" placeholder="IP to unban" style="width:130px">
+      <button type="submit" class="btn btn-sm">Unban (all jails)</button>
+    </form>
+    <form method="POST" action="/security/fail2ban/{{ node.id }}/ban" style="display:flex;gap:4px">
+      <input type="hidden" name="return_url" value="/nodes/{{ node.id }}/security">
+      <input name="ip_addr" placeholder="IP to ban" style="width:130px">
+      <button type="submit" class="btn btn-sm btn-danger">Ban</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="card-title"><i class="ti ti-lock"></i> Currently Banned</span></div>
+  <div data-live-region="jailed_q">
+  <div style="padding:12px 16px 0">
+  {% call toolbar(page=jailed_page, total_pages=jailed_total_pages, total=jailed_total, page_param="jailed_page", q_param="jailed_q") %}
+    <div class="fg" style="margin:0"><label class="fl">Search IP / jail / reason</label><input name="jailed_q" value="{{ request.args.get('jailed_q', '') }}" data-live-search data-page-param="jailed_page"></div>
+  {% endcall %}
+  </div>
+  {% if jailed %}
+  <table><thead><tr><th>IP</th><th>Jail(s)</th><th>Reason</th><th>Banned at</th><th>Time remaining</th><th></th></tr></thead>
+  <tbody>{% for j in jailed %}<tr>
+    <td class="mono">{{ j.ip_addr }}</td>
+    <td><span class="badge badge-bad">{{ j.jails }}</span>{% if j.jail_count > 1 %} <span style="font-size:10px;color:#888780">({{ j.jail_count }} jails)</span>{% endif %}</td>
+    <td style="font-size:11px;color:#888780">{{ j.reasons or '-' }}</td>
+    <td style="font-size:11px">{{ j.first_banned_at }}</td>
+    <td>{{ j.remaining_sec | duration_from_seconds }}</td>
+    <td style="white-space:nowrap">
+      <form method="POST" action="/security/fail2ban/{{ node.id }}/unban" style="display:inline" onsubmit="return confirm('Unban {{ j.ip_addr }} from all jails?')">
+        <input type="hidden" name="return_url" value="/nodes/{{ node.id }}/security">
+        <input type="hidden" name="ip_addr" value="{{ j.ip_addr }}">
+        <button type="submit" class="btn btn-sm">Unban</button>
+      </form>
+      <form method="POST" action="/security/fail2ban/{{ node.id }}/whitelist" style="display:inline" onsubmit="return confirm('Unban {{ j.ip_addr }} from all jails AND permanently whitelist it so fail2ban never bans it again -- continue?')">
+        <input type="hidden" name="return_url" value="/nodes/{{ node.id }}/security">
+        <input type="hidden" name="ip_addr" value="{{ j.ip_addr }}">
+        <button type="submit" class="btn btn-sm btn-primary">Whitelist</button>
+      </form>
+    </td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No IPs currently jailed on this node.</div>{% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="card-title"><i class="ti ti-history"></i> Recent ban activity</span></div>
+  <div data-live-region="ban_q">
+  <div style="padding:12px 16px 0">
+  {% call toolbar(page=ban_page, total_pages=ban_total_pages, total=ban_total, page_param="ban_page", q_param="ban_q") %}
+    <div class="fg" style="margin:0"><label class="fl">Search IP</label><input name="ban_q" value="{{ request.args.get('ban_q', '') }}" data-live-search data-page-param="ban_page"></div>
+  {% endcall %}
+  </div>
+  {% if ban_log %}
+  <table><thead><tr><th>Time</th><th>IP</th><th>Action</th><th>Jail</th><th>Reason</th><th>By</th></tr></thead>
+  <tbody>{% for b in ban_log %}<tr>
+    <td style="font-size:11px">{{ b.created_at }}</td><td class="mono">{{ b.ip_addr }}</td>
+    <td><span class="badge {{ 'badge-bad' if b.action=='ban' else 'badge-ok' }}">{{ b.action }}</span></td>
+    <td><span class="badge badge-info">{{ b.jail }}</span></td>
+    <td style="font-size:11px;color:#888780">{{ b.reason or '-' }}</td>
+    <td>{{ b.actor }}</td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No ban activity for this node yet.</div>{% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="card-title"><i class="ti ti-ban"></i> IPS (fail2ban) &mdash; ban policy</span>
+    {% if fail2ban_active is none %}
+    <span class="badge badge-warn">Status unknown -- node unreachable</span>
+    {% elif fail2ban_active %}
+    <span class="badge badge-ok">Enabled</span>
+    <form method="POST" action="/nodes/{{ node.id }}/security/fail2ban/toggle" style="display:inline" onsubmit="return confirm('Disable fail2ban on {{ node.name }}? This stops the service and removes ALL of its iptables rules in real time -- currently banned IPs will no longer be blocked by fail2ban.')">
+      <input type="hidden" name="return_url" value="/nodes/{{ node.id }}/security">
+      <input type="hidden" name="enable" value="0">
+      <button type="submit" class="btn btn-sm btn-danger">Disable</button>
+    </form>
+    {% else %}
+    <span class="badge badge-bad">Disabled</span>
+    <form method="POST" action="/nodes/{{ node.id }}/security/fail2ban/toggle" style="display:inline" onsubmit="return confirm('Enable fail2ban on {{ node.name }}? This starts the service and re-applies its iptables rules in real time.')">
+      <input type="hidden" name="return_url" value="/nodes/{{ node.id }}/security">
+      <input type="hidden" name="enable" value="1">
+      <button type="submit" class="btn btn-sm btn-primary">Enable</button>
+    </form>
+    {% endif %}
+  </div>
+  <p style="padding:0 16px;font-size:11px;color:#888780">How many strikes before a ban, the detection window, and how long the ban lasts &mdash; tuned per ban action. A ban blocks <strong>all traffic</strong> (every protocol, every port) from that source IP, not just SIP. Applied live via SSH on save (validated before reload; if invalid, the previous policy stays in effect and nothing is applied).</p>
+  <form method="POST" action="/nodes/{{ node.id }}/security/fail2ban/jails">
+  <div style="overflow-x:auto">
+  <table>
+    <thead><tr><th>Ban action</th><th>Enabled</th><th>Max retries</th><th>Find time</th><th>Ban time</th></tr></thead>
+    <tbody>
+    {% for j in jails %}
+    <tr>
+      <td style="min-width:220px"><b>{{ j.label }}</b><br><span style="font-size:11px;color:#888780">{{ j.description }}</span></td>
+      <td><input type="checkbox" name="jail_{{ j.jail_name }}_enabled" style="width:auto" {{ 'checked' if j.enabled }}></td>
+      <td><input type="number" name="jail_{{ j.jail_name }}_maxretry" value="{{ j.maxretry }}" min="1" style="width:56px"></td>
+      <td style="white-space:nowrap">
+        <input type="number" name="jail_{{ j.jail_name }}_findtime_value" value="{{ j.findtime_value }}" min="1" style="width:52px">
+        <select name="jail_{{ j.jail_name }}_findtime_unit" style="width:56px">
+          <option value="s" {{ 'selected' if j.findtime_unit=='s' }}>sec</option>
+          <option value="m" {{ 'selected' if j.findtime_unit=='m' }}>min</option>
+          <option value="h" {{ 'selected' if j.findtime_unit=='h' }}>hr</option>
+          <option value="d" {{ 'selected' if j.findtime_unit=='d' }}>day</option>
+        </select>
+      </td>
+      <td style="white-space:nowrap">
+        <input type="number" name="jail_{{ j.jail_name }}_bantime_value" value="{{ j.bantime_value }}" min="1" style="width:52px">
+        <select name="jail_{{ j.jail_name }}_bantime_unit" style="width:56px">
+          <option value="s" {{ 'selected' if j.bantime_unit=='s' }}>sec</option>
+          <option value="m" {{ 'selected' if j.bantime_unit=='m' }}>min</option>
+          <option value="h" {{ 'selected' if j.bantime_unit=='h' }}>hr</option>
+          <option value="d" {{ 'selected' if j.bantime_unit=='d' }}>day</option>
+        </select>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <div style="padding:16px"><button type="submit" class="btn btn-primary"><i class="ti ti-device-floppy"></i> Save &amp; apply ban policy</button></div>
+  </form>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="card-title"><i class="ti ti-radar-2"></i> Scanner &amp; flood protection</span></div>
+
+  <form method="POST" action="/nodes/{{ node.id }}/security/features">
+  <div style="padding:16px;border-bottom:1px solid var(--border)">
+    <h3 style="margin:0 0 10px;font-size:14px">Scanner protection</h3>
+    <div class="fg" style="flex-direction:row;align-items:center;gap:6px">
+      <input type="checkbox" name="scanner_block_enabled" style="width:auto" {{ 'checked' if node.scanner_block_enabled }}>
+      <label class="fl">Block SIP scanner fingerprints {{ help_icon("Block SIP scanner fingerprints", "Rejects requests from known SIP-scanning / attack tools (sipvicious, sipcli, friendly-scanner, etc.) and IP-literal Contacts. Checked below Call 1, so trusted subscribers and trunks never run the regex -- zero performance cost for legitimate traffic. Recommended on; takes effect on the next Full sync.") }}</label>
+    </div>
+  </div>
+  <div style="padding:16px;border-bottom:1px solid var(--border)">
+    <h3 style="margin:0 0 10px;font-size:14px">REGISTER-flood protection</h3>
+    <div class="fg" style="flex-direction:row;align-items:center;gap:6px">
+      <input type="checkbox" name="register_flood_gate" style="width:auto" {{ 'checked' if node.register_flood_gate }}>
+      <label class="fl">Enable per-source REGISTER-flood gate {{ help_icon("REGISTER-flood gate", "Enables per-source-IP REGISTER rate limiting to catch credential-stuffing / registration floods. The actual limit is set as a REGISTER-scope pipe on the Rate Limits page -- with this on but no pipe configured, the gate is inert. Turning this off removes the check entirely. Takes effect on the next Full sync.") }}</label>
+    </div>
+  </div>
+  <div style="padding:16px"><button type="submit" class="btn btn-primary"><i class="ti ti-device-floppy"></i> Save security features</button></div>
+  </form>
+
+  <div style="padding:16px;border-top:1px solid var(--border)">
+    <h3 style="margin:0 0 10px;font-size:14px">Scanner UA signatures</h3>
+    <p style="font-size:11px;color:#888780;margin:0 0 10px">Plain tool/User-Agent names to block when scanner protection (above) is on -- type the name, not a regex; it's matched literally and safely for you. Shared across every node. Takes effect on each node's next Full sync.</p>
+    {% if scanner_signatures %}
+    <table><thead><tr><th>Signature</th><th>Description</th><th>Status</th><th></th></tr></thead>
+    <tbody>{% for s in scanner_signatures %}<tr>
+      <td class="mono">{{ s.signature }}{% if s.is_builtin %} <i class="ti ti-lock" title="Built-in -- can be disabled but not deleted" style="font-size:11px;color:#888780"></i>{% endif %}</td>
+      <td style="font-size:11px;color:#888780">{{ s.description or '-' }}</td>
+      <td><span class="badge {{ 'badge-ok' if s.enabled else 'badge-bad' }}">{{ 'enabled' if s.enabled else 'disabled' }}</span></td>
+      <td style="white-space:nowrap">
+        <form method="POST" action="/security/scanner-signatures/{{ s.id }}/toggle" style="display:inline">
+          <input type="hidden" name="return_url" value="/nodes/{{ node.id }}/security">
+          <button type="submit" class="btn btn-sm">{{ 'Disable' if s.enabled else 'Enable' }}</button>
+        </form>
+        {% if not s.is_builtin %}
+        <form method="POST" action="/security/scanner-signatures/{{ s.id }}/delete" style="display:inline" onsubmit="return confirm('Delete signature {{ s.signature }}?')">
+          <input type="hidden" name="return_url" value="/nodes/{{ node.id }}/security">
+          <button type="submit" class="btn btn-sm btn-danger"><i class="ti ti-trash"></i></button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>{% endfor %}</tbody></table>
+    {% else %}<div class="empty">No signatures configured -- scanner protection has nothing to match (see the warning above).</div>{% endif %}
+    <form method="POST" action="/security/scanner-signatures/add" class="add-form" style="margin-top:12px">
+      <input type="hidden" name="return_url" value="/nodes/{{ node.id }}/security">
+      <div class="fg" style="width:200px"><label class="fl">Tool / UA name {{ help_icon("Tool / UA name", "The exact text to look for in the User-Agent header -- a plain name, never a regex. Special characters are automatically escaped so they're matched literally and can't be misinterpreted.") }}</label><input name="signature" placeholder="e.g. my-custom-scanner" maxlength="64" required></div>
+      <div class="fg" style="width:220px"><label class="fl">Description (optional)</label><input name="description" placeholder="what is this tool?"></div>
+      <button type="submit" class="btn btn-primary"><i class="ti ti-plus"></i> Add signature</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

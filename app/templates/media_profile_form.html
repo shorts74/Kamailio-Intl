@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">{{ 'Edit' if profile_id else 'Add' }} media profile</h1>
+<form method="POST" id="mpform">
+<div class="card"><div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Name</label><input name="name" value="{{ profile.name or '' if profile else '' }}" required></div>
+  <div class="fg"><label class="fl">Media Mode {{ help_icon("Media Mode", "Bypass: media never touches this node at all -- lowest resource use, but no visibility/quality data and no codec enforcement possible. Transparent: this node anchors the media path but never inspects or restricts codecs -- endpoints negotiate directly. Proxy: anchored, and the Audio Codecs list below is enforced as an allowlist -- if the two sides can't naturally agree on one of these codecs, the call fails rather than transcoding. Transcoding: same enforcement as Proxy, but if no natural match exists, this node actively converts between codecs to make the call work -- more CPU cost, but higher success rate. Video codecs are relayed untouched in every mode -- rtpengine cannot transcode or filter video, so Media Mode has no effect on video regardless of what's selected here.") }}</label><select name="media_mode" id="media_mode">
+    <option value="bypass" {{ 'selected' if profile and profile.media_mode=='bypass' }}>Bypass</option>
+    <option value="transparent" {{ 'selected' if profile and profile.media_mode=='transparent' }}>Transparent</option>
+    <option value="proxy" {{ 'selected' if (not profile) or profile.media_mode=='proxy' }}>Proxy</option>
+    <option value="transcoding" {{ 'selected' if profile and profile.media_mode=='transcoding' }}>Transcoding</option>
+  </select></div>
+  <div class="fg"><label class="fl">Combination Policy {{ help_icon("Combination Policy", "Only takes effect when this profile is the one resolved for the INBOUND leg of a call -- the outbound leg's own profile doesn't use this setting. Most restrictive wins: effective mode = max(inbound, outbound) -- if either side is Proxy/Transcoding, the whole call is. Least restrictive wins: effective mode = min(inbound, outbound) -- Bypass/Transparent wins if either side is. Inbound always wins: outbound's mode is ignored entirely, inbound's mode governs the whole call. Blend: inbound decides whether to anchor media and reject-vs-transcode, but outbound's own codec list still restricts what's allowed.") }}</label><select name="combination_policy">
+    <option value="most_restrictive" {{ 'selected' if (not profile) or profile.combination_policy=='most_restrictive' }}>Most restrictive wins</option>
+    <option value="least_restrictive" {{ 'selected' if profile and profile.combination_policy=='least_restrictive' }}>Least restrictive wins</option>
+    <option value="inbound_wins" {{ 'selected' if profile and profile.combination_policy=='inbound_wins' }}>Inbound always wins</option>
+    <option value="blend" {{ 'selected' if profile and profile.combination_policy=='blend' }}>Blend</option>
+  </select></div>
+  <div class="fg"><label class="fl">DTMF Mode {{ help_icon("DTMF Mode", "How touch-tone digits are carried in media for calls using this profile. RFC 2833 (RTP events): dedicated telephone-event RTP payload, the modern standard -- works correctly through transcoding and codec changes. Inband (audio): digits encoded directly as audible tones in the audio stream itself -- can be lost/distorted by codecs not designed to preserve them, especially low-bitrate ones like G.729 or Opus at low bitrates. SIP INFO: digits sent as separate SIP INFO messages outside the media stream entirely -- reliable but not universally supported by all endpoints.") }}</label><select name="dtmf_mode">
+    <option value="rfc2833" {{ 'selected' if (not profile) or profile.dtmf_mode=='rfc2833' }}>RFC 2833 (RTP events)</option>
+    <option value="inband" {{ 'selected' if profile and profile.dtmf_mode=='inband' }}>Inband (audio)</option>
+    <option value="info" {{ 'selected' if profile and profile.dtmf_mode=='info' }}>SIP INFO</option>
+  </select></div>
+  <div class="fg"><label class="fl">SRTP {{ help_icon("SRTP", "Encryption for the media (RTP) stream itself, for calls using this profile. Disabled: plain RTP, no encryption. Optional (SDES offer, allow fallback): offers encrypted media but accepts a fallback to plain RTP if the far end doesn't support SRTP. Required: rejects the call outright if the far end can't negotiate SRTP -- use when the far end is known to always support it and plain-RTP calls should never be allowed to happen by accident.") }}</label><select name="srtp_mode">
+    <option value="disabled" {{ 'selected' if (not profile) or profile.srtp_mode=='disabled' }}>Disabled</option>
+    <option value="optional" {{ 'selected' if profile and profile.srtp_mode=='optional' }}>Optional</option>
+    <option value="required" {{ 'selected' if profile and profile.srtp_mode=='required' }}>Required</option>
+  </select></div>
+  <div class="fg"><label class="fl">NAT handling {{ help_icon("NAT handling", "Passed to RTPEngine as a per-call hint for calls using this profile -- controls symmetric RTP behavior, not anything SIP-header-related. Auto-detect (recommended default): RTPEngine infers NAT from the SDP/source address itself. Force: always assume NAT and force symmetric RTP, regardless of what the SDP suggests -- useful for endpoints behind NAT that advertise correct-looking but unreachable private addresses. Off: skip NAT handling entirely -- only appropriate when every call using this profile genuinely has a public, directly-reachable IP.") }}</label><select name="nat_mode">
+    <option value="auto" {{ 'selected' if (not profile) or profile.nat_mode=='auto' }}>Auto-detect</option>
+    <option value="force" {{ 'selected' if profile and profile.nat_mode=='force' }}>Force (always assume NAT)</option>
+    <option value="off" {{ 'selected' if profile and profile.nat_mode=='off' }}>Off (calls have a public IP)</option>
+  </select></div>
+  <div class="fg"><label class="fl">Fax Mode {{ help_icon("Fax Mode", "How T.38 fax negotiation is handled for calls using this profile. Passthrough (recommended default): no conversion at all -- both endpoints negotiate T.38 or G.711 fax directly between themselves, this node just relays whatever they agree on. Zero dependency on any gateway mechanism working correctly. T.38 Gateway: converts incoming G.711-carried fax to T.38 when the far end only speaks T.38 -- genuinely supported by rtpengine (built on the mature, industry-standard libspandsp library, also used by Asterisk and FreeSWITCH), but only needed when one side can't already do T.38 itself. G.711 Gateway: the reverse -- converts incoming T.38 to G.711 audio for a far end that only does G.711 fax pass-through.") }}</label><select name="fax_mode">
+    <option value="passthrough" {{ 'selected' if (not profile) or profile.fax_mode=='passthrough' }}>Passthrough</option>
+    <option value="t38_gateway" {{ 'selected' if profile and profile.fax_mode=='t38_gateway' }}>T.38 Gateway</option>
+    <option value="g711_gateway" {{ 'selected' if profile and profile.fax_mode=='g711_gateway' }}>G.711 Gateway</option>
+  </select></div>
+  <div class="fg"><label class="fl" style="display:flex;align-items:center;gap:8px"><input type="checkbox" name="late_negotiation" style="width:auto" {{ 'checked' if (not profile) or profile.late_negotiation in (True, 'on', 't', 'true', 1) }}> Allow Late Negotiation {{ help_icon("Allow Late Negotiation", "Applies to delayed-offer calls (an INVITE with no SDP body -- the media offer arrives in the answering side's 200 OK instead, with the caller's answer in the ACK). Enabled (recommended default): the peer's offer passes through untouched and the endpoints negotiate codecs directly between themselves -- this naturally minimizes transcoding, since the answering side offers its full codec list and the caller simply picks a match. Disabled: this profile's codec policy is enforced even on these calls -- the peer's 200 OK offer is scrubbed against this profile's Audio Codec Order (intersected with the outbound side's, same as normal calls) before it ever reaches the caller. Only meaningful in Proxy/Transcoding modes; Transparent and Bypass never scrub codecs regardless of this setting.") }}</label></div>
+  <div class="fg" style="grid-column:1/-1"><label class="fl">Description</label><input name="description" value="{{ profile.description or '' if profile else '' }}"></div>
+</div></div>
+
+<div class="card" id="codec_card"><div style="padding:16px">
+  <label class="fl">Audio Codec Order {{ help_icon("Audio Codec Order", "Used as an allowlist in Proxy/Transcoding modes -- a call must end up using one of these codecs or it fails (Proxy) or gets actively transcoded to one (Transcoding). Order is priority: first is most preferred, used as the transcode target when multiple options exist. An empty list means no restriction is applied at all, regardless of Media Mode. 'Filterable only' codecs can be allowed or blocked but never used as an active transcode target -- rtpengine recognizes them but can't encode/decode them itself, so they only work when both sides already agree on them naturally. Note: the telephone-event DTMF payload (RFC 2833/4733) is deliberately NOT in this list -- it's an event channel negotiated alongside the audio codec, not an audio codec itself, and it is preserved automatically whenever DTMF Mode is set to RFC 2833, so codec choices here can never accidentally break DTMF.") }}</label>
+  <div style="display:flex;gap:8px;margin:10px 0 12px;align-items:center">
+    <select id="codec_picker" data-searchable data-placeholder="Type to search codecs..." style="width:220px">
+      <option value="">Add a codec...</option>
+      <option value="opus">opus</option>
+      <option value="PCMU">PCMU (G.711 u-law)</option>
+      <option value="PCMA">PCMA (G.711 A-law)</option>
+      <option value="G722">G722 (HD)</option>
+      <option value="G729">G729</option>
+      <option value="G729a">G729a</option>
+      <option value="GSM">GSM</option>
+      <option value="G723">G723</option>
+      <option value="speex">speex</option>
+      <option value="AMR">AMR</option>
+      <option value="AMR-WB">AMR-WB</option>
+      <option value="CN">CN (comfort noise)</option>
+      <option value="iLBC">iLBC (filterable only)</option>
+      <option value="QCELP">QCELP (filterable only, decode-only)</option>
+      <option value="ATRAC3">ATRAC3 (filterable only, decode-only)</option>
+      <option value="ATRAC-X">ATRAC-X (filterable only, decode-only)</option>
+      {% if settings and settings.evs_codec_enabled %}<option value="EVS">EVS</option>{% endif %}
+    </select>
+    <input type="text" id="codec_custom" placeholder="or type a custom codec name" style="flex:1;max-width:220px">
+    <button type="button" class="btn btn-sm" id="codec_add">Add</button>
+  </div>
+  <div style="font-size:11px;color:var(--muted,#888);margin-bottom:10px">
+    Not recognized by rtpengine at all, deliberately excluded here: <span class="mono">G.722.1</span> (Siren7/Polycom), <span class="mono">G.726</span>, <span class="mono">G.727</span>, <span class="mono">G.728</span>. If offered, these pass through unfiltered regardless of what's configured here -- same as video.
+  </div>
+  <table style="max-width:520px"><thead><tr><th style="width:36px">#</th><th>Codec</th><th style="width:150px">Support</th><th style="width:90px"></th></tr></thead>
+    <tbody id="codec_list"></tbody>
+  </table>
+  <div id="codec_empty" style="color:var(--muted,#888);font-size:13px;margin-top:8px">No codecs added -- an empty list means no allowlist restriction is applied (behaves like Transparent for codec purposes even in Proxy/Transcoding mode).</div>
+</div></div>
+
+<div class="card"><div style="padding:16px">
+  <p style="font-size:11px;color:#888780;margin:0">
+    Video codecs are relayed untouched in every Media Mode -- rtpengine cannot transcode or filter video codecs at all, confirmed directly against its own source and maintainers this session. There is deliberately no video codec configuration here; adding one would imply an enforcement capability that doesn't exist.
+  </p>
+</div></div>
+
+<button type="submit" class="btn btn-primary"><i class="ti ti-check"></i> {{ 'Save' if profile_id else 'Create profile' }}</button>
+<a href="/media-profiles" class="btn">Cancel</a>
+<input type="hidden" name="codec_order_json" id="codec_order_json">
+</form>
+
+<script>
+(function() {
+  var initial = {{ (profile.codec_order or '') | tojson if profile else '""' }};
+  var codecs = initial ? initial.split(',').filter(function(c){ return c.trim() !== ''; }) : [];
+
+  var TRANSCODE_CAPABLE = ['opus','PCMU','PCMA','G722','G723','G729','G729a','GSM','speex','AMR','AMR-WB','telephone-event','CN'];
+  var FILTER_ONLY = ['iLBC','QCELP','ATRAC3','ATRAC-X'];
+
+  function supportLabel(codec) {
+    if (TRANSCODE_CAPABLE.indexOf(codec) !== -1) return '<span class="badge badge-ok" style="font-size:10px">transcode-capable</span>';
+    if (FILTER_ONLY.indexOf(codec) !== -1) return '<span class="badge badge-warn" style="font-size:10px">filter-only</span>';
+    if (codec === 'EVS') return '<span class="badge badge-warn" style="font-size:10px">needs rtpengine config</span>';
+    return '<span class="badge" style="font-size:10px;color:#888780">custom/unverified</span>';
+  }
+
+  var listEl = document.getElementById('codec_list');
+  var emptyEl = document.getElementById('codec_empty');
+  var hiddenEl = document.getElementById('codec_order_json');
+
+  function render() {
+    listEl.innerHTML = '';
+    emptyEl.style.display = codecs.length ? 'none' : 'block';
+    codecs.forEach(function(codec, i) {
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td style="color:var(--muted,#888);font-size:12px">' + (i + 1) + '</td>' +
+        '<td class="mono">' + codec + '</td>' +
+        '<td>' + supportLabel(codec) + '</td>' +
+        '<td style="white-space:nowrap">' +
+          '<button type="button" class="btn btn-sm" data-act="up" data-i="' + i + '"' + (i === 0 ? ' disabled' : '') + ' title="Move up">&uarr;</button>' +
+          '<button type="button" class="btn btn-sm" data-act="down" data-i="' + i + '"' + (i === codecs.length - 1 ? ' disabled' : '') + ' title="Move down">&darr;</button>' +
+          '<button type="button" class="btn btn-sm" data-act="remove" data-i="' + i + '" title="Remove">&times;</button>' +
+        '</td>';
+      listEl.appendChild(tr);
+    });
+    hiddenEl.value = JSON.stringify(codecs);
+  }
+
+  listEl.addEventListener('click', function(e) {
+    var btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    var i = parseInt(btn.getAttribute('data-i'), 10);
+    var act = btn.getAttribute('data-act');
+    if (act === 'remove') { codecs.splice(i, 1); }
+    if (act === 'up' && i > 0) { var t = codecs[i-1]; codecs[i-1] = codecs[i]; codecs[i] = t; }
+    if (act === 'down' && i < codecs.length - 1) { var t2 = codecs[i+1]; codecs[i+1] = codecs[i]; codecs[i] = t2; }
+    render();
+  });
+
+  document.getElementById('codec_add').addEventListener('click', function() {
+    var picker = document.getElementById('codec_picker');
+    var custom = document.getElementById('codec_custom');
+    var val = custom.value.trim() || picker.value;
+    if (val && codecs.indexOf(val) === -1) {
+      codecs.push(val);
+      picker.value = '';
+      // The searchable-combobox enhancement (base.html) wraps this
+      // select in its own visible text input, which isn't
+      // automatically kept in sync when picker.value is reset from
+      // outside the combobox's own choose() function -- confirmed via
+      // direct testing as a real bug otherwise (picker.value resets
+      // correctly, but the visible search text stays showing the
+      // just-added codec, looking broken even though it's functionally
+      // reset). Clear it directly if the enhancement initialized.
+      var comboInput = picker.closest('.combo-wrap');
+      comboInput = comboInput ? comboInput.querySelector('.combo-input') : null;
+      if (comboInput) comboInput.value = '';
+      custom.value = '';
+      render();
+    }
+  });
+
+  render();
+})();
+</script>
+{% endblock %}

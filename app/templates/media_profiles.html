@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 12px">Media Profiles</h1>
+<p style="color:var(--muted,#888);font-size:13px;margin:0 0 16px">
+  Reusable media-handling policies (mode + codec allowlist/priority + inbound combination policy).
+  Attach at SIP Profile (mandatory default), Domain, Trunk, or Route level -- same override shape as Routing Profiles.
+</p>
+
+<div data-live-region="q">
+{% call toolbar(page=page, total_pages=total_pages, total=total, add_url="/media-profiles/new", add_label="Add media profile") %}
+  <div class="fg" style="margin:0"><label class="fl">Search</label><input name="q" value="{{ q }}" placeholder="profile name..." data-live-search data-page-param="page"></div>
+  {% if q %}<a href="/media-profiles" class="btn btn-sm">Clear</a>{% endif %}
+{% endcall %}
+
+<div class="card">
+  {% if profiles %}
+  <table><thead><tr><th>Name</th><th>Mode</th><th>Codec Order</th><th>Combination Policy</th><th>In Use</th><th></th></tr></thead>
+  <tbody>{% for p in profiles %}<tr>
+    <td><a href="/media-profiles/{{ p.id }}/edit"><b>{{ p.name }}</b></a>{% if p.description %}<div style="font-size:12px;color:var(--muted,#888)">{{ p.description }}</div>{% endif %}</td>
+    <td><span class="badge badge-{{ {'bypass':'info','transparent':'info','proxy':'warn','transcoding':'warn'}[p.media_mode] }}">{{ p.media_mode }}</span></td>
+    <td class="mono" style="font-size:12px">{{ p.codec_order or '-' }}</td>
+    <td>{{ p.combination_policy }}</td>
+    <td>
+      {% set total_use = p.sip_profile_count + p.trunk_count %}
+      {% if total_use > 0 %}
+        {{ p.sip_profile_count }} SIP Profile default{{ 's' if p.sip_profile_count != 1 }}, {{ p.trunk_count }} trunk override{{ 's' if p.trunk_count != 1 }}
+      {% else %}<span style="color:var(--muted,#888)">not directly assigned</span>{% endif %}
+    </td>
+    <td style="text-align:right"><a href="/media-profiles/{{ p.id }}/edit" class="btn btn-sm">Edit</a></td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No media profiles yet. <a href="/media-profiles/new">Create your first one</a>.</div>{% endif %}
+</div>
+</div>
+{% endblock %}

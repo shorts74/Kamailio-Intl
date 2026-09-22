@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 4px">Certificates</h1>
+<p style="font-size:12px;color:#888780;margin:0 0 12px">A Manager-owned registry for TLS certificates and SSH keys, pushed to nodes on demand. Web keeps using certbot's own auto-renewed certificate unless you nominate a different one here; HEP has no certificate nominated until you set one, which just means TLS mode isn't available for HEP yet -- nodes stay on plain UDP.</p>
+
+<div class="card"><div class="card-head"><span class="card-title"><i class="ti ti-certificate"></i> TLS Certificates</span>
+  <button type="button" class="btn btn-sm btn-primary" onclick="document.getElementById('add-cert-form').style.display='block'"><i class="ti ti-plus"></i> Add certificate</button></div>
+<div data-live-region="certs_q">
+<form id="add-cert-form" method="POST" action="/certificates/add" style="padding:16px;display:none;border-bottom:1px dashed #ddd">
+  <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+    <div class="fg" style="margin:0"><label class="fl">Name</label><input name="name" style="width:160px" required></div>
+    <div class="fg" style="margin:0"><label class="fl">Method</label><select name="method" onchange="
+      document.getElementById('cert-paste').style.display = this.value=='paste' ? 'flex' : 'none';
+      document.getElementById('cert-path').style.display = this.value=='path' ? 'flex' : 'none';
+      document.getElementById('cert-generate').style.display = this.value=='generate' ? 'flex' : 'none';">
+      <option value="paste">Paste content</option>
+      <option value="path">Import from local path</option>
+      <option value="generate">Generate self-signed</option>
+    </select></div>
+  </div>
+  <div id="cert-paste" style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px">
+    <div class="fg" style="margin:0;flex:1;min-width:280px"><label class="fl">Certificate (PEM)</label><textarea name="cert_pem" rows="4" style="width:100%;font-family:monospace;font-size:11px"></textarea></div>
+    <div class="fg" style="margin:0;flex:1;min-width:280px"><label class="fl">Private key (PEM)</label><textarea name="key_pem" rows="4" style="width:100%;font-family:monospace;font-size:11px"></textarea></div>
+  </div>
+  <div id="cert-path" style="display:none;gap:12px;flex-wrap:wrap;margin-top:10px">
+    <div class="fg" style="margin:0"><label class="fl">Certificate file path</label><input name="cert_path" style="width:280px" placeholder="/etc/ssl/certs/example.crt"></div>
+    <div class="fg" style="margin:0"><label class="fl">Key file path</label><input name="key_path" style="width:280px" placeholder="/etc/ssl/private/example.key"></div>
+    <div class="fg" style="margin:0;flex-basis:100%"><span style="font-size:11px;color:#888780">Read once at import time and stored from that point forward -- no ongoing dependency on this path after adding.</span></div>
+  </div>
+  <div id="cert-generate" style="display:none;gap:12px;flex-wrap:wrap;margin-top:10px">
+    <div class="fg" style="margin:0"><label class="fl">Common Name (CN)</label><input name="common_name" style="width:220px" placeholder="defaults to the name above"></div>
+    <div class="fg" style="margin:0;flex-basis:100%"><span style="font-size:11px;color:#888780">Self-signed, 10-year validity. Appropriate for internal-only traffic (HEP) where there's no public CA to verify against -- the cert's own signature becomes the trust anchor a node checks directly.</span></div>
+  </div>
+  <button type="submit" class="btn btn-primary" style="margin-top:10px"><i class="ti ti-plus"></i> Add certificate</button>
+</form>
+<div style="padding:12px 16px 0">
+{% call toolbar(page=certs_page, total_pages=certs_total_pages, total=certs_total, page_param="certs_page", q_param="certs_q") %}
+  <div class="fg" style="margin:0"><label class="fl">Search</label><input name="certs_q" value="{{ request.args.get('certs_q', '') }}" placeholder="cert name..." data-live-search data-page-param="certs_page"></div>
+{% endcall %}
+</div>
+<table><thead><tr><th>Name</th><th>Source</th><th>Deployed on</th><th>Nominated for</th><th></th></tr></thead>
+<tbody>{% for c in certs %}<tr>
+  <td><b>{{ c.name }}</b></td>
+  <td><span class="badge badge-info">{{ c.source }}</span></td>
+  <td>{{ c.node_count }} node{{ 's' if c.node_count != 1 }}</td>
+  <td>
+    {% if active_web_cert_id == c.id %}<span class="badge badge-ok">Web</span>{% endif %}
+    {% if active_hep_cert_id == c.id %}<span class="badge badge-ok">HEP</span>{% endif %}
+  </td>
+  <td>
+    <form method="POST" action="/certificates/nominate" style="display:inline">
+      <input type="hidden" name="purpose" value="web"><input type="hidden" name="cert_id" value="{{ c.id }}">
+      <button type="submit" class="btn btn-sm" {{ 'disabled' if active_web_cert_id == c.id }}>Nominate for Web</button>
+    </form>
+    <form method="POST" action="/certificates/nominate" style="display:inline">
+      <input type="hidden" name="purpose" value="hep"><input type="hidden" name="cert_id" value="{{ c.id }}">
+      <button type="submit" class="btn btn-sm" {{ 'disabled' if active_hep_cert_id == c.id }}>Nominate for HEP</button>
+    </form>
+    <a href="/certificates/{{ c.id }}/delete" class="btn btn-sm btn-danger" onclick="return confirm('Remove certificate {{ c.name }}?')"><i class="ti ti-trash"></i></a>
+  </td>
+</tr>{% endfor %}</tbody></table>
+{% if not certs %}<div class="empty">No certificates yet.</div>{% endif %}
+</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title"><i class="ti ti-key"></i> SSH Keys</span>
+  <button type="button" class="btn btn-sm btn-primary" onclick="document.getElementById('add-key-form').style.display='block'"><i class="ti ti-plus"></i> Add SSH key</button></div>
+<div data-live-region="keys_q">
+<form id="add-key-form" method="POST" action="/ssh-keys/add" style="padding:16px;display:none;border-bottom:1px dashed #ddd">
+  <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+    <div class="fg" style="margin:0"><label class="fl">Name</label><input name="name" style="width:160px" required></div>
+    <div class="fg" style="margin:0"><label class="fl">Method</label><select name="method" onchange="
+      document.getElementById('key-paste').style.display = this.value=='paste' ? 'flex' : 'none';
+      document.getElementById('key-generate').style.display = this.value=='generate' ? 'block' : 'none';">
+      <option value="paste">Paste public key</option>
+      <option value="generate">Generate new keypair</option>
+    </select></div>
+  </div>
+  <div id="key-paste" style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px">
+    <div class="fg" style="margin:0;flex:1;min-width:280px"><label class="fl">Public key</label><input name="public_key" style="width:100%;font-family:monospace;font-size:11px" placeholder="ssh-ed25519 AAAA..."></div>
+  </div>
+  <div id="key-generate" style="display:none;margin-top:10px">
+    <span style="font-size:11px;color:#888780">Generates a new ed25519 keypair. The private key is stored so it can be pushed later, but rotating a node's actual primary key is a separate, staged action from that node's own Settings.</span>
+  </div>
+  <button type="submit" class="btn btn-primary" style="margin-top:10px"><i class="ti ti-plus"></i> Add SSH key</button>
+</form>
+<div style="padding:12px 16px 0">
+{% call toolbar(page=keys_page, total_pages=keys_total_pages, total=keys_total, page_param="keys_page", q_param="keys_q") %}
+  <div class="fg" style="margin:0"><label class="fl">Search</label><input name="keys_q" value="{{ request.args.get('keys_q', '') }}" placeholder="key name..." data-live-search data-page-param="keys_page"></div>
+{% endcall %}
+</div>
+<p style="padding:0 16px;font-size:11px;color:#888780">The default automation key (below, if generated) is what every node uses unless rotated to something else. Everything else here is a secondary/rotation key -- see a node's own Settings to push one and make it that node's primary.</p>
+<table><thead><tr><th>Name</th><th>Source</th><th>Deployed on</th><th></th></tr></thead>
+<tbody>
+{% if default_key_pub %}
+<tr style="background:#f7f6f2">
+  <td><b>Default automation key</b> <span class="badge badge-info">built-in</span></td>
+  <td><span class="badge badge-ok">generated at install</span></td>
+  <td>{{ default_key_node_count }} node{{ 's' if default_key_node_count != 1 }}</td>
+  <td></td>
+</tr>
+<tr style="background:#f7f6f2"><td colspan="4" style="padding-top:0"><code class="mono" style="font-size:10px;word-break:break-all;color:#5f5e5a">{{ default_key_pub }}</code></td></tr>
+{% endif %}
+{% for k in keys %}<tr>
+  <td><b>{{ k.name }}</b></td>
+  <td><span class="badge badge-info">{{ k.source }}</span></td>
+  <td>{{ k.node_count }} node{{ 's' if k.node_count != 1 }}</td>
+  <td><a href="/ssh-keys/{{ k.id }}/delete" class="btn btn-sm btn-danger" onclick="return confirm('Remove SSH key {{ k.name }}?')"><i class="ti ti-trash"></i></a></td>
+</tr>{% endfor %}</tbody></table>
+{% if not keys and not default_key_pub %}<div class="empty">No SSH keys in the registry yet.</div>{% endif %}
+</div>
+</div>
+{% endblock %}

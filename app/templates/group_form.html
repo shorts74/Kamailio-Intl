@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">{{ 'Edit group' if group and group.id else 'Add group' }}</h1>
+<form method="POST" action="{{ ('/groups/' ~ group.id ~ '/edit') if group and group.id else ('/nodes/' ~ node_id ~ '/groups/new') }}">
+<div class="card"><div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Name</label><input name="name" value="{{ group.name or '' if group else '' }}" required></div>
+  <div class="fg"><label class="fl">Algorithm {{ help_icon("Algorithm", "How calls are distributed across this group's member trunks. Passed directly to Kamailio's dispatcher module as its own 'alg' parameter -- this is the actual mechanism, not a platform abstraction on top of it.") }}</label><select name="dispatch_alg" id="dispatch_alg" onchange="document.querySelectorAll('.alg-info').forEach(function(e){e.style.display='none'}); document.getElementById('alg-info-' + this.value).style.display='block';">
+    <option value="4">Round-robin</option>
+    <option value="6">Random</option>
+    <option value="8">Priority (serial failover)</option>
+    <option value="9">Weight-based</option>
+    <option value="11">Relative weight (with congestion control)</option>
+    <option value="12">Parallel forking (ring all at once)</option>
+    <option value="10">Call load (fewest active calls)</option>
+    <option value="13">Latency-optimized</option>
+    <option value="14">Round-robin / priority hybrid</option>
+  </select></div>
+  <div class="fg"><label class="fl">Routing plan</label><select name="routing_profile_id">
+    <option value="">Default</option>{% for p in routing_profiles %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="register_enabled" style="width:auto"><label class="fl">Group-level registration</label></div>
+  <div class="fg" style="grid-column:1/-1"><label class="fl">Description</label><input name="description" value="{{ group.description or '' if group else '' }}"></div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Selected Algorithm Reference</span></div>
+<div style="padding:16px;font-size:12px;line-height:1.6">
+  <div class="alg-info" id="alg-info-4" style="display:block">
+    <b>Round-robin (default)</b> -- cycles through member trunks in order, one at a time. No trunk-level fields needed. Fair distribution, no special config required.
+  </div>
+  <div class="alg-info" id="alg-info-6" style="display:none">
+    <b>Random</b> -- picks a random member trunk on each call. No trunk-level fields needed.
+  </div>
+  <div class="alg-info" id="alg-info-8" style="display:none">
+    <b>Priority (serial failover)</b> -- always tries the lowest-numbered <span class="mono">Priority</span> trunk first (set on each trunk's own edit page); if it fails, automatically tries the next-lowest. This is genuine serial failover, not simultaneous ringing.
+  </div>
+  <div class="alg-info" id="alg-info-9" style="display:none">
+    <b>Weight-based</b> -- distributes calls by percentage using each trunk's <span class="mono">Weight</span> field (1-100). The weights across all members should sum to ≤100; if under 100, the last trunk absorbs the remainder. Example: two trunks weighted 70/30 send roughly 70% and 30% of calls respectively.
+  </div>
+  <div class="alg-info" id="alg-info-11" style="display:none">
+    <b>Relative weight</b> -- similar to Weight-based, but recalculates proportionally if a member goes down (e.g. two trunks at rweight 1/1 split 50/50; if one fails, the survivor gets 100% automatically, no manual rebalancing). Set each trunk's <span class="mono">Relative weight</span> field. Optionally enable <span class="mono">Congestion control</span> per trunk to have Kamailio's measured ping latency reduce that trunk's effective weight under load.
+  </div>
+  <div class="alg-info" id="alg-info-12" style="display:none">
+    <b>Parallel forking</b> -- rings every member trunk simultaneously; whichever answers first is connected, the rest are automatically canceled. No trunk-level fields needed. <b>Trade-off worth knowing:</b> no serial failover and no per-trunk health tracking are possible with this algorithm -- a failure means every member failed to answer, not "try the next one," since there is no next one.
+  </div>
+  <div class="alg-info" id="alg-info-10" style="display:none">
+    <b>Call load</b> -- routes each new call to whichever member currently has the fewest active calls. Requires no per-trunk fields, but needs the node-wide <span class="mono">dispatcher / ds_hash_size</span> setting (Node Settings) to be greater than 0 -- ask before relying on this if unsure it's set.
+  </div>
+  <div class="alg-info" id="alg-info-13" style="display:none">
+    <b>Latency-optimized</b> -- round-robins while favoring higher-<span class="mono">Priority</span> trunks, automatically adjusting effective priority down as measured ping latency increases. Requires the node-wide <span class="mono">dispatcher / ds_ping_latency_stats</span> setting (Node Settings) to be enabled -- otherwise this behaves like plain priority-based round-robin with no latency adjustment.
+  </div>
+  <div class="alg-info" id="alg-info-14" style="display:none">
+    <b>Round-robin / priority hybrid</b> -- round-robins normally if every member shares the same <span class="mono">Priority</span> value; if priorities differ, falls back to serial failover by priority instead (same as algorithm 8).
+  </div>
+</div></div>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  var sel = document.getElementById('dispatch_alg');
+  {% if group %}sel.value = "{{ group.dispatch_alg or '4' }}";{% endif %}
+  sel.dispatchEvent(new Event('change'));
+});
+</script>
+<button type="submit" class="btn btn-primary"><i class="ti ti-check"></i> {{ 'Save changes' if group and group.id else 'Create group' }}</button>
+<a href="/nodes/{{ node_id }}/trunks" class="btn">Cancel</a>
+</form>
+{% endblock %}

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">Add Blocklist</h1>
+<form method="POST">
+<div class="card"><div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Name</label><input name="name" value="{{ blocklist.name or '' if blocklist else '' }}" required></div>
+  <div class="fg" style="grid-column:1/-1"><label class="fl">Description</label><input name="description" value="{{ blocklist.description or '' if blocklist else '' }}"></div>
+  <div class="fg"><label class="fl">Default action {{ help_icon("Default action", "What happens when a call matches an entry that doesn't have its own override -- reject the call outright, or divert it (substitute the number) and let it continue routing normally.") }}</label><select name="default_action">
+    <option value="reject" {{ 'selected' if not blocklist or blocklist.default_action=='reject' }}>Reject</option>
+    <option value="divert" {{ 'selected' if blocklist and blocklist.default_action=='divert' }}>Divert</option>
+  </select></div>
+  <div class="fg"><label class="fl">Default reject code</label><input name="default_reject_code" value="{{ blocklist.default_reject_code or 603 if blocklist else 603 }}" style="width:80px"></div>
+  <div class="fg"><label class="fl">Default reject reason</label><input name="default_reject_reason" value="{{ blocklist.default_reject_reason or 'Number blocked' if blocklist else 'Number blocked' }}"></div>
+  <div class="fg"><label class="fl">Default divert number {{ help_icon("Default divert number", "Only used when default action is Divert -- the number a blocked call is redirected to instead. Can be overridden per entry.") }}</label><input name="default_divert_number" value="{{ blocklist.default_divert_number or '' if blocklist else '' }}"></div>
+</div></div>
+<button type="submit" class="btn btn-primary"><i class="ti ti-check"></i> Create Blocklist</button>
+<a href="/blocklists" class="btn">Cancel</a>
+</form>
+{% endblock %}

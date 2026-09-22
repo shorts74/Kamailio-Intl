@@ -1,0 +1,19 @@
+# Private configuration
+infrastructure/manager.conf
+
+# SSH and Linux user files
+.ssh/
+.bash_history
+.bash_logout
+.bashrc
+.profile
+.gitconfig
+.viminfo
+.sudo_as_admin_successful
+
+# Archives
+*.zip
+
+# Python generated files
+__pycache__/
+*.pyc

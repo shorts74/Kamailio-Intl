@@ -1,0 +1,29 @@
+{# Reusable sortable column header -- click to sort, arrow shows
+   current direction. Standard as of this session (see DESIGN.md §24):
+   sorting lives in the table header, not a separate "Sort by"
+   dropdown in the filter toolbar (filter and sort are different
+   concepts and shouldn't be conflated in one control row).
+
+   Usage: inside a <tr>, in place of a plain <th>:
+     {{ sort_th("Domain", "name", sort, sort_dir) }}
+     {{ sort_th("Realm", "realm", sort, sort_dir) }}
+   label: display text.
+   column_key: the value this column sends as the `sort` query param
+     -- must match a key the route's sort_map (or equivalent) knows
+     how to translate into a real SQL column.
+   current_sort/current_dir: the currently-active sort column/direction
+     (direction is "asc" or "desc"), as passed to the template --
+     used to decide which arrow to show and which direction a click
+     toggles to.
+   Requires the calling template to already have `request` available
+   (standard in every page here) -- preserves every other current
+   query param (search, filters, etc.) while changing sort/dir and
+   resetting page to 1, same page-reset reasoning as a new search.
+#}
+{% macro sort_th(label, column_key, current_sort, current_dir, page_param='page') %}
+{% set is_active = (current_sort == column_key) %}
+{% set next_dir = 'asc' if (is_active and current_dir == 'desc') else ('desc' if is_active else 'asc') %}
+{% set qs = request.args.to_dict() %}
+{% set _ = qs.update({'sort': column_key, 'dir': next_dir, page_param: 1}) %}
+<th><a href="?{{ qs|urlencode }}" data-live-sort style="color:inherit;text-decoration:none;display:inline-flex;align-items:center;gap:3px;cursor:pointer">{{ label }}<span style="font-size:9px;color:{{ '#333' if is_active else '#c8c7c1' }}">{% if is_active and current_dir == 'desc' %}&#9660;{% else %}&#9650;{% endif %}</span></a></th>
+{% endmacro %}

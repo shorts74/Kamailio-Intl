@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">{{ acl.name }}</h1>
+
+<div class="card"><div class="card-head"><span class="card-title">Tagged to domains</span></div>
+<div style="padding:16px">
+  {% if domains_tagged %}
+  {% for d in domains_tagged %}<span class="badge badge-info" style="margin-right:6px"><a href="/domains/{{ d.id }}" style="color:inherit">{{ d.name }}</a></span>{% endfor %}
+  {% else %}<span style="font-size:12px;color:#888780">Not tagged to any domain yet -- tag it from a domain's edit form.</span>{% endif %}
+</div></div>
+
+<div class="card"><div data-live-region="q"><div style="padding:16px 16px 0">
+
+{% call toolbar(page=page, total_pages=total_pages, total=total, export_url="/acls/" ~ acl.id ~ "/export.csv", import_url="/acls/" ~ acl.id ~ "/import") %}
+  <div class="fg" style="margin:0"><label class="fl">Search CIDR</label><input name="q" value="{{ q }}" data-live-search data-page-param="page"></div>
+  {% if q %}<a href="/acls/{{ acl.id }}" class="btn btn-sm">Clear</a>{% endif %}
+{% endcall %}
+
+<form method="POST" action="/acls/{{ acl.id }}/entries/new" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+  <div class="fg" style="margin:0"><label class="fl">Type</label>
+    <select name="ip_version" id="acl-ip-version" onchange="
+      const f = document.getElementById('acl-cidr-input');
+      f.placeholder = this.value === '6' ? '::/0' : '0.0.0.0/0';
+      f.dataset.suffix = this.value === '6' ? '/128' : '/32';
+    ">
+      <option value="4">IPv4</option>
+      <option value="6">IPv6</option>
+    </select>
+  </div>
+  <div class="fg" style="margin:0"><label class="fl">CIDR</label>
+    <input name="cidr" id="acl-cidr-input" style="width:180px" placeholder="0.0.0.0/0" data-suffix="/32" required
+      onblur="
+        const v = this.value.trim();
+        if (v && !v.includes('/')) {
+          const looksComplete = this.dataset.suffix === '/128' ? v.includes(':') : (v.match(/\./g) || []).length === 3;
+          if (looksComplete) this.value = v + this.dataset.suffix;
+        }
+      ">
+  </div>
+  <div class="fg" style="margin:0"><label class="fl">Description</label><input name="description" style="width:160px"></div>
+  <div class="fg" style="margin:0"><label class="fl">Action</label>
+    <select name="action">
+      <option value="allow">Allow</option>
+      <option value="deny">Deny</option>
+    </select>
+  </div>
+  <button type="submit" class="btn btn-sm">Add entry</button>
+</form>
+<p style="margin:4px 0 12px;font-size:11px;color:#888780;padding-bottom:12px;border-bottom:1px dashed #ddd">Leave CIDR as just an IP (no /mask) and it'll auto-complete to /32 (IPv4) or /128 (IPv6) when you tab out -- edit it yourself for a wider range.</p>
+
+</div>
+<table><thead><tr><th>CIDR</th><th>Description</th><th>Action</th><th></th></tr></thead>
+<tbody>{% for e in entries %}<tr><td class="mono">{{ e.cidr }}</td><td>{{ e.description or '' }}</td>
+  <td>{% if e.action == 'deny' %}<span class="badge badge-bad">Deny</span>{% else %}<span class="badge badge-ok">Allow</span>{% endif %}</td>
+  <td><a href="/acls/entries/{{ e.id }}/delete" class="btn btn-sm">Remove</a></td></tr>{% endfor %}</tbody></table>
+{% if not entries %}<div class="empty">No CIDR entries match.</div>{% endif %}
+</div>
+</div>
+{% endblock %}

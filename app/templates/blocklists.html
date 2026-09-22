@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 4px">Blocklists</h1>
+<p style="font-size:12px;color:#888780;margin:0 0 12px">Reusable named blocklists of numbers/prefixes to reject or divert. Attach one to a routing plan's Blocklist engine (checked against called and/or calling number) to enforce it.</p>
+
+<div data-live-region="q">
+{% call toolbar(page=page, total_pages=total_pages, total=total, add_url="/blocklists/new", add_label="Add Blocklist") %}
+  <div class="fg" style="margin:0"><label class="fl">Search</label><input name="q" value="{{ q }}" placeholder="Blocklist name..." data-live-search data-page-param="page"></div>
+  {% if q %}<a href="/blocklists" class="btn btn-sm">Clear</a>{% endif %}
+{% endcall %}
+
+<div class="card">
+  {% if blocklists %}
+  <table><thead><tr><th>Name</th><th>Description</th><th>Default action</th><th>Entries</th></tr></thead>
+  <tbody>{% for b in blocklists %}<tr>
+    <td><a href="/blocklists/{{ b.id }}"><b>{{ b.name }}</b></a></td><td>{{ b.description or '' }}</td>
+    <td>{{ b.default_action }}{% if b.default_action == 'reject' %} ({{ b.default_reject_code }}){% else %} &rarr; {{ b.default_divert_number or '?' }}{% endif %}</td>
+    <td>{{ b.entry_count }}</td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No blocklists match. <a href="/blocklists/new">Add your first one</a>.</div>{% endif %}
+</div>
+</div>
+{% endblock %}

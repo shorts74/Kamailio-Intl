@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">Settings
+  <a href="/node-bundle" class="btn btn-sm" style="float:right;margin-left:6px"><i class="ti ti-package"></i> Node Bundle</a>
+  <a href="/settings/manager-security" class="btn btn-sm" style="float:right;margin-left:6px"><i class="ti ti-shield-lock"></i> Manager Security</a>
+  <a href="/settings/module-reference" class="btn btn-sm" style="float:right;margin-left:6px"><i class="ti ti-books"></i> Module Reference</a>
+  <a href="/settings/variable-catalog" class="btn btn-sm" style="float:right;margin-left:6px"><i class="ti ti-code"></i> Variable Catalog</a>
+  <a href="/settings/modparam-catalog" class="btn btn-sm" style="float:right"><i class="ti ti-list-details"></i> Modparam Catalog</a></h1>
+<form method="POST">
+<div class="card"><div class="card-head"><span class="card-title">Branding</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg" style="grid-column:1/-1"><label class="fl">Company name</label><input name="company_name" value="{{ settings.company_name }}"></div>
+  <div class="fg"><label class="fl">Primary color</label><input name="primary_color" type="color" value="{{ settings.primary_color }}" style="height:38px"></div>
+  <div class="fg"><label class="fl">Primary (dark variant)</label><input name="primary_dark" type="color" value="{{ settings.primary_dark }}" style="height:38px"></div>
+  <div class="fg"><label class="fl">Primary (light variant)</label><input name="primary_light" type="color" value="{{ settings.primary_light }}" style="height:38px"></div>
+  <div class="fg"><label class="fl">Accent (dark)</label><input name="accent_dark" type="color" value="{{ settings.accent_dark }}" style="height:38px"></div>
+  <div class="fg" style="grid-column:1/-1"><label class="fl">Logo URL</label><input name="logo_url" value="{{ settings.logo_url or '' }}" placeholder="https://... (leave blank for the default icon)"></div>
+</div>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">Primary is used for active-nav highlighting and accents; the dark/light variants control hover and background-tint states; Accent is used for buttons and page titles. All four already drive base.html's color variables -- this is just where they're edited.</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Homer trace retention</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Retention (days)</label><input name="homer_retention_days" type="number" value="{{ settings.homer_retention_days }}"></div>
+</div>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">
+  Manager-wide (heplify-server is a single shared instance capturing traces from every node, not per-node).
+  Applies immediately on save -- briefly restarts trace capture (a few seconds of dropped traces, no call impact).
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Display</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Table page size</label><input name="default_page_size" type="number" min="5" value="{{ settings.default_page_size }}"></div>
+</div>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">Applies to every paginated table across the app (Nodes, Domains, Rate Plans, SIP Profiles, Alerts, etc).</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Dispatcher setid ranges (default for new nodes)</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Trunk range start</label><input name="default_trunk_setid_range_start" type="number" min="1" value="{{ settings.default_trunk_setid_range_start }}"></div>
+  <div class="fg"><label class="fl">Trunk range end</label><input name="default_trunk_setid_range_end" type="number" min="1" value="{{ settings.default_trunk_setid_range_end }}"></div>
+  <div class="fg"><label class="fl">Gateway group range start</label><input name="default_gateway_group_setid_range_start" type="number" min="1" value="{{ settings.default_gateway_group_setid_range_start }}"></div>
+  <div class="fg"><label class="fl">Gateway group range end</label><input name="default_gateway_group_setid_range_end" type="number" min="1" value="{{ settings.default_gateway_group_setid_range_end }}"></div>
+</div>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">
+  Each trunk and gateway group gets its own dispatcher setid, allocated independently of its own database id (so deleted trunks' setids are recycled, and the two ranges can never collide regardless of how many trunks have ever existed). These are the defaults a <b>new</b> node inherits at registration -- changing them here doesn't affect any already-registered node; adjust an individual node's ranges from its own Node Settings page instead. The gateway group range must start after the trunk range ends.
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">EVS Codec</span></div>
+<div style="padding:16px">
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px;margin:0"><input type="checkbox" name="evs_codec_enabled" style="width:auto" {{ 'checked' if settings.evs_codec_enabled }}><label class="fl" style="margin:0">Enable EVS as a selectable codec in Media Profiles</label></div>
+  <p style="font-size:11px;color:#888780;margin:10px 0 0">
+    Off by default. Every node attempts to build EVS support for rtpengine automatically (best-effort -- a build failure on any given node doesn't stop that node's install, it just runs without EVS available). This toggle is separate from whether it's built: it controls whether EVS actually appears as something admins can select in Media Profiles at all.
+    <br><br>
+    <b>Worth knowing before enabling</b>: EVS is a patent-encumbered codec, jointly developed by Fraunhofer, JVCKenwood, NTT, NTT Docomo, Panasonic, and Ericsson. The 3GPP reference implementation being publicly downloadable (which is how each node builds support for it) is for standards-conformance and interoperability development -- it is not the same thing as a royalty-free grant to transcode real production traffic. Whether your deployment needs a patent license to actually use EVS commercially is a legal question this platform can't answer for you.
+  </p>
+</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Log & Data Retention (Manager)</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Audit log (days)</label><input name="audit_log_retention_days" type="number" value="{{ settings.audit_log_retention_days }}"></div>
+  <div class="fg"><label class="fl">Sync changelog (days)</label><input name="sync_log_retention_days" type="number" value="{{ settings.sync_log_retention_days }}"></div>
+  <div class="fg"><label class="fl">Ban log (days)</label><input name="ban_log_retention_days" type="number" value="{{ settings.ban_log_retention_days }}"></div>
+  <div class="fg"><label class="fl">App log files (days)</label><input name="app_log_retention_days" type="number" value="{{ settings.app_log_retention_days }}"></div>
+</div>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">
+  Audit/sync/ban logs are database tables, pruned daily (03:17) by a cron job. App log files (this Manager's own
+  sip-platform.log and cron job logs) use a logrotate config applied immediately on save. Per-node log files
+  (sync-routing.log, push-stats.log) are configured on each Node's own Settings page instead.
+</div></div>
+
+<button type="submit" class="btn btn-primary"><i class="ti ti-check"></i> Save settings</button>
+</form>
+
+<div class="card"><div class="card-head"><span class="card-title">Kiosk Tokens</span></div>
+<table><thead><tr><th>Name</th><th>Scope</th><th>Last used</th><th></th></tr></thead>
+<tbody>{% for t in kiosk_tokens %}<tr>
+  <td>{{ t.name }}</td><td>{% if t.node_name %}{{ t.node_name }}{% else %}<span class="badge badge-info">Global</span>{% endif %}</td>
+  <td>{{ t.last_used_at or 'never' }}</td>
+  <td><a href="/settings/kiosk-tokens/{{ t.id }}/revoke" class="btn btn-sm">Revoke</a></td>
+</tr>{% endfor %}</tbody></table>
+{% if not kiosk_tokens %}<div class="empty">No active kiosk tokens.</div>{% endif %}
+<form method="POST" action="/settings/kiosk-tokens/new" style="padding:16px;display:flex;gap:8px;align-items:end">
+  <div class="fg" style="margin:0"><label class="fl">Name</label><input name="name" placeholder="Ops room TV" required></div>
+  <div class="fg" style="margin:0"><label class="fl">Scope</label><select name="scope_node_id">
+    <option value="">Global (all nodes)</option>{% for n in nodes %}<option value="{{ n.id }}">{{ n.name }} only</option>{% endfor %}
+  </select></div>
+  <button type="submit" class="btn btn-sm"><i class="ti ti-plus"></i> Create token</button>
+</form>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">The board URL is shown once when created -- save it immediately, it can't be retrieved again (only revoked and re-created).</div>
+</div>
+{% endblock %}

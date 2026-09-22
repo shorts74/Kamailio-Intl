@@ -1,0 +1,470 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">{{ 'Edit trunk' if trunk and trunk.id else 'Add trunk' }}</h1>
+<p style="font-size:12px;color:#888780;margin:-8px 0 16px">A trunk is one specific connection to a carrier or PBX -- its own IP, auth,
+  and routing settings. It must belong to a SIP Profile on this node (the listener socket it's reachable through).</p>
+<form method="POST">
+
+<div class="card"><div class="card-head"><span class="card-title">Basics</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Name</label><input name="name" value="{{ trunk.name or '' if trunk else '' }}" required></div>
+  <div class="fg"><label class="fl">IP / hostname</label><input name="ip_addr" value="{{ trunk.ip_addr or '' if trunk else '' }}" required></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px;grid-column:1/-1"><input type="checkbox" name="trust_dns_resolved_ip" style="width:auto" {{ 'checked' if trunk and trunk.trust_dns_resolved_ip }}><label class="fl">Trust DNS-resolved IP {{ help_icon("Trust DNS-resolved IP", "Unchecked (default, recommended): this trunk's IP/hostname above is NEVER resolved via DNS for identity or trust purposes -- only explicit ACL entries below, and (for trunks with Requires registration checked) the exact ip:port that answers this node's own outbound REGISTER, are used to recognize inbound calls from this trunk. Checked: if IP/hostname above is a hostname, it's resolved via DNS and the resolved IP(s) are added to the firewall allow-list automatically, kept in sync on every routing update. Leave unchecked unless you specifically need it -- DNS-based trust is inherently riskier than a static ACL: a compromised or hijacked DNS response for this hostname could redirect trust to an attacker-controlled IP. This is an explicit, per-trunk opt-in to that risk, not a default.") }}</label></div>
+  <div class="fg"><label class="fl">Port</label><input type="number" name="port" value="{{ trunk.port if trunk else '' }}" placeholder="5060"></div>
+  <div class="fg"><label class="fl">Transport</label><select name="transport">
+    {% for t in ['udp','tcp','tls'] %}<option value="{{ t }}" {{ 'selected' if trunk and trunk.transport==t }}>{{ t|upper }}</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">Trunk label {{ help_icon("Trunk label", "Purely descriptive/display -- doesn't affect routing, identity, or authentication behavior in any way, all of which are now uniform regardless of this value. \"Requires registration\" below is the real, independent setting for whether this trunk registers.") }}</label>
+    <select name="trunk_type">
+      <option value="peer" {{ 'selected' if not trunk or trunk.trunk_type != 'provider' }}>Peer</option>
+      <option value="provider" {{ 'selected' if trunk and trunk.trunk_type == 'provider' }}>Provider</option>
+    </select>
+  </div>
+  <div class="fg" style="grid-column:1/-1;margin:-4px 0 0;font-size:11px;color:#888780">
+    Display-only, for your own reference (e.g. distinguishing a wholesale carrier from a hosted PBX at a glance) -- has no effect on how this trunk actually behaves. See "Requires registration" below for the real, functional setting.
+  </div>
+  <div class="fg"><label class="fl">Outbound proxy {{ help_icon("Outbound proxy", "Optional -- routes this trunk's outbound traffic through a different next-hop address (e.g. an SBC in front of the real carrier) without changing the trunk's own identity. This trunk's own IP/hostname above is still what's used for routing decisions, caller-ID/CDR attribution, and inbound trust -- only where the outbound packet is actually SENT changes. Accepts ip:port or a bare hostname (optionally with :port); a hostname with no port uses Kamailio's own SRV/NAPTR resolution, same as Register URI above.") }}</label><input name="outbound_proxy" value="{{ trunk.outbound_proxy or '' if trunk else '' }}" placeholder="Optional -- e.g. sbc.example.com or 203.0.113.9:5060"></div>
+  <div class="fg"><label class="fl">SIP Profile</label><select name="sip_profile_id" id="sip_profile_id" required onchange="updateRealmOptions()">
+    <option value="">-- select --</option>
+    {% for p in profiles %}<option value="{{ p.id }}" {{ 'selected' if trunk and trunk.sip_profile_id==p.id }}>{{ p.name }} ({{ p.ip_addr }}:{{ p.port }})</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">Realm {{ help_icon("Realm", "Extended numbers/aliasing design: the domain this trunk connects TO (this node's own FQDN) -- required, and constrained to domains already bound to the SIP Profile selected above, since a domain unrelated to that profile could never actually be reached by this trunk. This becomes the trunk's own realm for DID/alias scoping -- multiple trunks can share one realm (e.g. a DID provider's redundant upstream servers), but each trunk's own alias/DID numbers must stay unique within it.") }}</label><select name="realm_domain_id" id="realm_domain_id" required>
+    <option value="">-- select a SIP Profile first --</option>
+  </select></div>
+  <div class="fg"><label class="fl">Group (optional) {{ help_icon("Group", "Adds this trunk to a Gateway Group -- a set of trunks load-balanced/failed-over together using the Dispatcher settings below (Priority, Weight, Relative weight) and a group-wide algorithm configured on the group itself. Leave as None for a standalone trunk with no siblings to share traffic with.") }}</label><select name="gateway_group_id">
+    <option value="">None</option>{% for g in groups %}<option value="{{ g.id }}" {{ 'selected' if trunk and trunk.gateway_group_id==g.id }}>{{ g.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">Routing plan {{ help_icon("Routing plan", "Which routing plan governs calls through this trunk. There is no system-wide default -- leaving this as None means no routing at all for this trunk; inbound calls will get 404 No Route Found until a plan is explicitly assigned.") }}</label><select name="routing_profile_id">
+    <option value="">None (no routing)</option>{% for p in routing_profiles %}<option value="{{ p.id }}" {{ 'selected' if trunk and trunk.routing_profile_id==p.id }}>{{ p.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg"><label class="fl">Media profile (optional) {{ help_icon("Media profile", "Controls RTPEngine behavior for calls on this trunk -- codec preferences, transcoding, SRTP, NAT handling, DTMF mode. Leave as \"Inherit\" to use whatever this trunk's SIP Profile has configured; only pick a specific profile if this trunk genuinely needs different media handling than its siblings on the same SIP Profile.") }}</label><select name="media_profile_id">
+    <option value="">Inherit from SIP Profile</option>{% for m in media_profiles %}<option value="{{ m.id }}" {{ 'selected' if trunk and trunk.media_profile_id==m.id }}>{{ m.name }} ({{ m.media_mode }})</option>{% endfor %}
+  </select></div>
+  <div class="fg" style="grid-column:1/-1"><label class="fl">Notes</label><input name="notes" value="{{ trunk.notes or '' if trunk else '' }}"></div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Outbound auth (calls we send TO this trunk)</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="auth_enabled" style="width:auto" {{ 'checked' if trunk and trunk.auth_enabled }}><label class="fl">Requires auth</label></div>
+  <div class="fg" style="grid-column:1/-1;margin:-4px 0 0;font-size:11px;color:#888780">Check this if the trunk itself must authenticate OUTBOUND calls to the carrier. Separate from "Requires registration" below.</div>
+  <div class="fg"><label class="fl">Auth username {{ help_icon("Auth username", "This trunk's own SIP auth username, used both to authenticate outbound calls/REGISTERs to this trunk and, by default, for inbound digest auth if that's enabled below. Also used as a fallback for Contact user/From user in Outbound registration below if those are left blank -- see their help text for why that matters.") }}</label><input name="auth_user" value="{{ trunk.auth_user or '' if trunk else '' }}"></div>
+  <div class="fg"><label class="fl">Auth password</label><input name="auth_pass" value="{{ trunk.auth_pass or '' if trunk else '' }}"></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="trust_provider_realm" style="width:auto" {{ 'checked' if not trunk or trunk.trust_provider_realm }}><label class="fl">Trust provider realm</label></div>
+  <div class="fg"><label class="fl">Auth realm {{ help_icon("Auth realm", "Scope: outbound calls and registration to this trunk -- not inbound auth, see below. With Trust provider realm checked (default), this field is ignored: confirmed via direct testing (including verifying the actual digest response hash cryptographically, not just checking for an error) that Kamailio's uac module, when no realm is pre-configured, correctly authenticates and registers against whatever realm the provider's own challenge actually specifies -- no pre-configured match needed. Uncheck to instead REQUIRE this exact value, for a provider that needs strict validation; a mismatch then means outbound calls fail authentication and registration silently retries forever, both with no obvious error in the UI.") }}</label><input name="auth_realm" value="{{ trunk.auth_realm or '' if trunk else '' }}" placeholder="Only used if Trust provider realm is unchecked"></div>
+  <div style="grid-column:1/-1;margin:-8px 0 4px;font-size:11px;color:#888780">
+    Applies to both outbound call authentication and registration (Requires registration below) -- confirmed working correctly for both. <b>Inbound auth further down is a separate, unaffected concern: we're always the one issuing the challenge there, so it always needs its own real, pre-configured value regardless of this setting.</b>
+    <b>Asterisk-based PBX systems (including PBXact) commonly challenge with the literal realm <code>asterisk</code></b>, regardless of the trunk's actual domain -- Trust provider realm (default) handles this automatically; if you've turned it off, this is the first thing worth trying.
+  </div>
+</div></div>
+
+<div class="card" id="registration-card"><div class="card-head"><span class="card-title">Outbound registration (this node registers TO the trunk)</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px;grid-column:1/-1"><input type="checkbox" name="register_enabled" style="width:auto" {{ 'checked' if trunk and trunk.register_enabled }}><label class="fl">Requires registration {{ help_icon("Requires registration", "Independent of everything else on this trunk -- a trunk can authenticate outbound calls (Requires auth above) with or without also registering. When checked, this node sends a periodic REGISTER to Register URI below, using Auth username/password from the Outbound auth card; the trunk's live status is then only genuinely \"Registered\" once that REGISTER actually succeeds, not just when it's reachable. When unchecked, reachability is judged by OPTIONS pings instead, and none of the other fields in this card (besides Register URI, which can still serve a different purpose) have any effect.") }}</label></div>
+  <div class="fg"><label class="fl">Register URI {{ help_icon("Register URI", "With Requires registration checked: the target this node sends REGISTER to -- defaults to sip:{this trunk's IP/hostname}:{port} if left blank. With Requires registration UNCHECKED: no REGISTER is ever sent, but this value can still be used as an explicit R-URI/To domain override (see R-URI domain / To domain further down) -- useful when this trunk's actual IP/hostname is a proxy or SBC address, and the provider needs a different, specific domain name in the SIP messages themselves.") }}</label><input name="register_uri" value="{{ trunk.register_uri or '' if trunk else '' }}" placeholder="Defaults to sip:{ip}:{port}"></div>
+  <div class="fg"><label class="fl">Expire (seconds) {{ help_icon("Expire (seconds)", "How often this node re-sends REGISTER to keep the registration alive. Only meaningful when Requires registration is checked.") }}</label><input type="number" name="register_expire" value="{{ trunk.register_expire if trunk else '' }}" placeholder="3600"></div>
+  <div class="fg"><label class="fl">Contact user {{ help_icon("Contact user", "The actual username sent to the far end in this REGISTER -- what the far end remembers this registration AS, and therefore what it puts in the R-URI/To of any call it sends us. If left blank, falls back to Auth username above, then to this trunk's own name in the Manager. A real, confirmed failure mode: leaving this blank on a trunk named e.g. \"trunk-1\" means an Asterisk/PBXact system inbound-routes every call to the literal string \"trunk-1\" instead of a real extension -- routing then fails since no rule matches that. Set this to the actual extension/DID this trunk should register as (e.g. 2000) whenever the far end uses the registered identity to address inbound calls.") }}</label><input name="register_contact_user" value="{{ trunk.register_contact_user or '' if trunk else '' }}" placeholder="Defaults to auth username, then trunk name"></div>
+  <div class="fg"><label class="fl">From user {{ help_icon("From user", "The username sent in this REGISTER's From header. Same fallback chain and same failure mode as Contact user above -- some far-end systems key off From instead of (or in addition to) Contact when deciding how to address inbound calls to this registration, so it's safest to set this to the same value as Contact user rather than leave it to infer.") }}</label><input name="register_from_user" value="{{ trunk.register_from_user or '' if trunk else '' }}" placeholder="Defaults to auth username, then trunk name"></div>
+  <div class="fg"><label class="fl">From domain {{ help_icon("From domain", "Also builds the Request-URI/To domain actually sent to the registrar, not just the From header -- deliberately does NOT default to Auth Realm above, even though that field is right next to it, since the realm is only meaningful for digest challenge matching and is often a fixed string like \"asterisk\" that has nothing to do with the trunk's real address. Defaults to this trunk's own IP/hostname if left blank.") }}</label><input name="register_from_domain" value="{{ trunk.register_from_domain or '' if trunk else '' }}" placeholder="Defaults to this trunk's IP/hostname"></div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Inbound auth (calls this trunk sends TO us)</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Auth mode {{ help_icon("Auth mode", "How this platform decides an inbound request genuinely came from this trunk. IP-based: source address must match this trunk's own IP/hostname or an attached ACL entry -- no credentials involved. Digest: a challenge/response using the Digest username/password below, regardless of source address. IP + Digest: both are required together, the strictest option. Most wholesale/carrier trunks use IP-based; some hosted PBX platforms require Digest.") }}</label><select name="inbound_auth_mode">
+    <option value="ip" {{ 'selected' if trunk and trunk.inbound_auth_mode=='ip' }}>IP-based (source address)</option>
+    <option value="digest" {{ 'selected' if trunk and trunk.inbound_auth_mode=='digest' }}>Digest (username/password)</option>
+  </select></div>
+  <div class="fg"><label class="fl">Digest username {{ help_icon("Digest username", "If left blank, defaults to the Outbound auth section's own Auth username above -- the common case where this trunk authenticates the same way in both directions. Only fill this in if the far end genuinely needs different inbound credentials than what this node sends when registering/calling out to it.") }}</label><input name="inbound_auth_user" value="{{ trunk.inbound_auth_user or '' if trunk else '' }}" placeholder="Defaults to Auth username above"></div>
+  <div class="fg"><label class="fl">Digest password</label><input name="inbound_auth_pass" value="{{ trunk.inbound_auth_pass or '' if trunk else '' }}"></div>
+  <div class="fg"><label class="fl">Digest realm {{ help_icon("Digest realm", "Defaults to the Outbound auth section's own Auth realm above, then to this trunk's IP/hostname if that's blank too.") }}</label><input name="inbound_auth_realm" value="{{ trunk.inbound_auth_realm or '' if trunk else '' }}" placeholder="Defaults to auth realm, then IP/hostname"></div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Rate Limit (optional)</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px">
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="rl_enabled" style="width:auto" {{ 'checked' if trunk_pipe }}><label class="fl" style="margin:0">Enabled {{ help_icon("Rate limit enabled", "Caps how many requests per second this trunk can send, using Kamailio's own pipe/rate-limiting mechanism -- protects this node from being overwhelmed by a single trunk (a misconfigured PBX in a call loop, a compromised carrier account, etc). Unrelated to Max concurrent channels below, which caps simultaneous calls rather than request rate.") }}</label></div>
+  <div class="fg"><label class="fl">Algorithm {{ help_icon("Algorithm", "TAILDROP: requests over the limit are rejected outright once the limit is hit within the interval -- simple, predictable. RED (Random Early Detection): starts probabilistically rejecting some requests as the rate approaches the limit, before hitting it outright -- smoother under bursty traffic, but less predictable. TAILDROP is the more common choice unless you're specifically tuning for burst behavior.") }}</label><select name="rl_algorithm">
+    <option value="TAILDROP" {{ 'selected' if not trunk_pipe or trunk_pipe.algorithm=='TAILDROP' }}>TAILDROP</option>
+    <option value="RED" {{ 'selected' if trunk_pipe and trunk_pipe.algorithm=='RED' }}>RED</option>
+  </select></div>
+  <div class="fg"><label class="fl">Limit (requests per interval) {{ help_icon("Limit", "Maximum requests allowed per interval before this algorithm kicks in (interval is a node-wide setting, not per-trunk). Applies to all SIP requests from this trunk, not just INVITEs.") }}</label><input name="rl_limit" type="number" value="{{ trunk_pipe.limit_value if trunk_pipe else 20 }}"></div>
+</div>
+<div style="padding:0 16px 16px;font-size:11px;color:#888780">Manages the same pipe shown on the node's Rate Limits tab -- use that tab for more options (RED tuning, monitoring alongside other pipes).</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Dispatcher: priority, weight, capacity</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Priority {{ help_icon("Priority", "Used by the group's Priority and Latency-optimized algorithms (and the priority/RR hybrid). Lower number = tried first / preferred. Not used by Round-robin, Random, Weight-based, Relative weight, Call load, or Parallel forking.") }}</label><input type="number" name="priority" value="{{ trunk.priority if trunk else '' }}" placeholder="10"></div>
+  <div class="fg"><label class="fl">Weight {{ help_icon("Weight", "Used only by the group's Weight-based algorithm. 1-100; the weights of all trunks in the group should sum to ≤100. Not used by any other algorithm.") }}</label><input type="number" name="weight" value="{{ trunk.weight if trunk else '' }}" placeholder="1"></div>
+  <div class="fg"><label class="fl">Relative weight {{ help_icon("Relative weight", "Used only by the group's Relative weight algorithm. 1-100; unlike plain Weight, the effective split recalculates automatically if a member trunk goes down. Not used by any other algorithm.") }}</label><input type="number" name="rweight" value="{{ trunk.rweight if trunk else '' }}" placeholder="1"></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="congestion_control_enabled" style="width:auto" {% if trunk and trunk.congestion_control_enabled %}checked{% endif %}><label class="fl">Congestion control {{ help_icon("Congestion control", "Only meaningful alongside the group's Relative weight algorithm. When enabled, this trunk's effective weight is automatically reduced as its measured ping latency rises under load, shifting more traffic to less-congested trunks in the group.") }}</label></div>
+  <div class="fg">
+    <label class="fl">Max concurrent channels {{ help_icon("Max concurrent channels", "Caps simultaneous active calls on this trunk -- once reached, further inbound or outbound calls through it are rejected until one ends. 0 or blank means unlimited. Unrelated to Rate Limit above, which caps requests per second rather than concurrent calls.") }}</label>
+    <input type="number" name="max_channels" value="{{ trunk.max_channels or '' if trunk else '' }}" placeholder="0 or blank = unlimited">
+  </div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Caller ID Settings &mdash; Inbound</span></div>
+<div style="padding:16px 16px 0;font-size:11px;color:#888780">
+  This trunk's own requirement for calls <b>originating from</b> it (it's the SOURCE) -- decides which number is actually used, and enforces what this trunk is allowed to claim as caller ID. The full resolution order: the number is extracted from wherever it lives on the wire (plain header, or PAI/RPID if preferred below) &rarr; this Inbound enforcement applies &rarr; routing matches/manipulates against the enforced value &rarr; the destination's own Outbound enforcement gets final say.
+</div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div style="grid-column:1/-1;font-size:11px;font-weight:600;color:#5f5e5a;text-transform:uppercase;letter-spacing:.03em;margin-top:4px">Caller</div>
+  <div class="fg"><label class="fl">Caller ID mode {{ help_icon("Caller ID mode", "What this trunk is allowed to present as caller ID on calls it originates. \"Allow any\": whatever arrives passes through unmodified. \"Allow DIDs only\": must be one of this trunk's own Allowed Caller ID Numbers (below on this page once saved) or it's rewritten to a default. \"Force custom\": always rewritten to the Custom number field. \"Force specific number\": always rewritten to the Forced number field (one fixed DID). \"Force per number\": for a trunk with multiple assigned numbers, each is enforced to map to itself.") }}</label>
+    <select name="inbound_callerid_mode">
+      <option value="allow_any" {{ 'selected' if trunk and trunk.inbound_callerid_mode=='allow_any' }}>Allow any</option>
+      <option value="allow_dids_only" {{ 'selected' if trunk and trunk.inbound_callerid_mode=='allow_dids_only' }}>Allow DIDs only</option>
+      <option value="force_custom" {{ 'selected' if trunk and trunk.inbound_callerid_mode=='force_custom' }}>Force custom number</option>
+      <option value="force_specific_number" {{ 'selected' if trunk and trunk.inbound_callerid_mode=='force_specific_number' }}>Force specific number</option>
+      <option value="force_per_number" {{ 'selected' if trunk and trunk.inbound_callerid_mode=='force_per_number' }}>Force per number</option>
+    </select>
+  </div>
+  <div class="fg"><label class="fl">Caller ID name {{ help_icon("Caller ID name", "Display name presented alongside the number, e.g. \"Acme Corp\". Left blank means no display name is sent at all -- an empty string is never sent as a literal blank name in quotes.") }}</label><input name="inbound_callerid_name" value="{{ trunk.inbound_callerid_name or '' if trunk else '' }}" placeholder="Optional"></div>
+  <div class="fg"><label class="fl">Custom number {{ help_icon("Custom number", "Used only when Caller ID mode above is \"Force custom number\".") }}</label><input name="inbound_callerid_custom_number" value="{{ trunk.inbound_callerid_custom_number or '' if trunk else '' }}" placeholder="e.g. +15551234567"></div>
+  <div class="fg"><label class="fl">Forced number {{ help_icon("Forced number", "Used only when Caller ID mode above is \"Force specific number\" -- one fixed number, typically one of this trunk's own assigned DIDs.") }}</label><input name="inbound_callerid_forced_number" value="{{ trunk.inbound_callerid_forced_number or '' if trunk else '' }}" placeholder="e.g. +15551234567"></div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="inbound_use_pai_rpid_incoming" style="width:auto" {{ 'checked' if trunk and trunk.inbound_use_pai_rpid_incoming }}><label class="fl">Prefer P-Asserted-Identity/Remote-Party-ID {{ help_icon("Prefer PAI/RPID", "When a call arrives from this trunk, read the caller ID from a P-Asserted-Identity or Remote-Party-ID header if present, instead of the plain From header. Some carriers put the real, billable number here while From carries something else entirely.") }}</label></div>
+  <div style="grid-column:1/-1;font-size:11px;font-weight:600;color:#5f5e5a;text-transform:uppercase;letter-spacing:.03em;margin-top:8px;border-top:0.5px solid #e8e7e1;padding-top:12px">Called</div>
+  <div class="fg"><label class="fl">Called number source {{ help_icon("Called number source", "Which part of an incoming call from this trunk actually carries the dialed number. \"Request-URI\" (default, standard): trust the R-URI. \"To header\": some trunks put the real DID in To instead. \"RPID\": a minority of trunks convey it via Remote-Party-ID.") }}</label>
+    <select name="inbound_called_number_source">
+      <option value="request_uri" {{ 'selected' if trunk and trunk.inbound_called_number_source=='request_uri' }}>Request-URI</option>
+      <option value="to_header" {{ 'selected' if trunk and trunk.inbound_called_number_source=='to_header' }}>To header</option>
+      <option value="rpid" {{ 'selected' if trunk and trunk.inbound_called_number_source=='rpid' }}>Remote-Party-ID</option>
+    </select>
+  </div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Caller ID Settings &mdash; Outbound</span></div>
+<div style="padding:16px 16px 0;font-size:11px;color:#888780">
+  This trunk's own requirement for calls <b>routed TO</b> it (it's the DESTINATION) -- applied AFTER routing, capable of overriding whatever the originating side already decided (e.g. a carrier that only accepts caller IDs from its own assigned number pool), then controls exactly how the final number gets written into the outgoing message.
+</div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div style="grid-column:1/-1;font-size:11px;font-weight:600;color:#5f5e5a;text-transform:uppercase;letter-spacing:.03em;margin-top:4px">Caller</div>
+  <div class="fg"><label class="fl">Caller ID mode {{ help_icon("Caller ID mode (outbound)", "This trunk's own requirement for calls sent OUT through it -- applied AFTER routing, and can override whatever the originating side already decided. Typical use: a carrier that only accepts caller IDs from its own assigned number pool, regardless of what the calling subscriber's own settings allowed. Same mode meanings as the Inbound side above.") }}</label>
+    <select name="outbound_callerid_mode">
+      <option value="allow_any" {{ 'selected' if trunk and trunk.outbound_callerid_mode=='allow_any' }}>Allow any</option>
+      <option value="allow_dids_only" {{ 'selected' if trunk and trunk.outbound_callerid_mode=='allow_dids_only' }}>Allow DIDs only</option>
+      <option value="force_custom" {{ 'selected' if trunk and trunk.outbound_callerid_mode=='force_custom' }}>Force custom number</option>
+      <option value="force_specific_number" {{ 'selected' if trunk and trunk.outbound_callerid_mode=='force_specific_number' }}>Force specific number</option>
+      <option value="force_per_number" {{ 'selected' if trunk and trunk.outbound_callerid_mode=='force_per_number' }}>Force per number</option>
+    </select>
+  </div>
+  <div class="fg"><label class="fl">Custom number {{ help_icon("Custom number (outbound)", "Used only when Caller ID mode above is \"Force custom number\".") }}</label><input name="outbound_callerid_custom_number" value="{{ trunk.outbound_callerid_custom_number or '' if trunk else '' }}" placeholder="e.g. +15551234567"></div>
+  <div class="fg"><label class="fl">Forced number {{ help_icon("Forced number (outbound)", "Used only when Caller ID mode above is \"Force specific number\".") }}</label><input name="outbound_callerid_forced_number" value="{{ trunk.outbound_callerid_forced_number or '' if trunk else '' }}" placeholder="e.g. +15551234567"></div>
+  <div class="fg"><label class="fl">Presentation method {{ help_icon("Presentation method", "How the final caller ID is actually written into the message sent to this trunk. \"From header\" (default, standard): the plain From header carries it. \"P-Asserted-Identity\": real identity in PAI, From can be anonymized separately (see Privacy mode below). \"Remote-Party-ID\": an older, less common alternative some carriers/PBXs still expect.") }}</label>
+    <select name="outbound_callerid_method">
+      <option value="from_header" {{ 'selected' if trunk and trunk.outbound_callerid_method=='from_header' }}>From header</option>
+      <option value="pai" {{ 'selected' if trunk and trunk.outbound_callerid_method=='pai' }}>P-Asserted-Identity</option>
+      <option value="rpid" {{ 'selected' if trunk and trunk.outbound_callerid_method=='rpid' }}>Remote-Party-ID</option>
+    </select>
+  </div>
+  <div class="fg"><label class="fl">Number URI format {{ help_icon("Number URI format", "How a phone-number-shaped identifier (caller ID and/or called number, wherever it's placed) is formatted in the outgoing URI. \"SIP URI\" (default): sip:+14155551234@domain. \"SIP URI with user=phone\": sip:+14155551234@domain;user=phone -- some carriers require this parameter to recognize the user part as a real telephone number. \"tel: URI\": tel:+14155551234, with no domain/user part at all -- a small number of carriers require this exact form.") }}</label>
+    <select name="outbound_number_uri_format">
+      <option value="sip_uri" {{ 'selected' if trunk and trunk.outbound_number_uri_format=='sip_uri' }}>SIP URI</option>
+      <option value="sip_uri_user_phone" {{ 'selected' if trunk and trunk.outbound_number_uri_format=='sip_uri_user_phone' }}>SIP URI with user=phone</option>
+      <option value="tel_uri" {{ 'selected' if trunk and trunk.outbound_number_uri_format=='tel_uri' }}>tel: URI</option>
+    </select>
+  </div>
+  <div class="fg"><label class="fl">From domain part {{ help_icon("From domain part", "What goes in the domain part of the outgoing From header (and PAI, if used). Transparent: leave whatever domain the original caller's identity carried, unchanged. Local IP: this node's own internal/listen address. Advertised IP: this node's public-facing address -- what most carriers expect when they require the From domain to match the IP they're actually receiving traffic from. Trunk remote IP/hostname: this specific trunk's own configured address (ip_addr/hostname, optionally :port) -- some carriers expect the From domain to match where the call is actually being sent, not our own address. Custom domain: uses the \"From domain\" field below (falls back to Transparent if that field is left blank).") }}</label>
+    <select name="outbound_from_domain_mode">
+      <option value="remote" {{ 'selected' if not trunk or not trunk.outbound_from_domain_mode or trunk.outbound_from_domain_mode=='remote' }}>Trunk remote IP/hostname (default)</option>
+      <option value="transparent" {{ 'selected' if trunk and trunk.outbound_from_domain_mode=='transparent' }}>Transparent (pass through caller's own domain)</option>
+      <option value="local_ip" {{ 'selected' if trunk and trunk.outbound_from_domain_mode=='local_ip' }}>Local IP (this node's internal address)</option>
+      <option value="advertised_ip" {{ 'selected' if trunk and trunk.outbound_from_domain_mode=='advertised_ip' }}>Advertised IP (this node's public address)</option>
+      <option value="custom" {{ 'selected' if trunk and trunk.outbound_from_domain_mode=='custom' }}>Custom domain (uses "From domain" field below)</option>
+    </select>
+  </div>
+  <div style="grid-column:1/-1;font-size:11px;font-weight:600;color:#5f5e5a;text-transform:uppercase;letter-spacing:.03em;margin-top:8px;border-top:0.5px solid #e8e7e1;padding-top:12px">Called</div>
+  <div class="fg"><label class="fl">Called number placement {{ help_icon("Called number placement", "Where the dialed number is written in the outgoing message. \"Request-URI\" (default, standard). \"To header\": some carriers expect it duplicated there. \"RPID\": rare, a minority of destinations expect it conveyed via Remote-Party-ID instead.") }}</label>
+    <select name="outbound_called_number_placement">
+      <option value="request_uri" {{ 'selected' if trunk and trunk.outbound_called_number_placement=='request_uri' }}>Request-URI</option>
+      <option value="to_header" {{ 'selected' if trunk and trunk.outbound_called_number_placement=='to_header' }}>To header</option>
+      <option value="rpid" {{ 'selected' if trunk and trunk.outbound_called_number_placement=='rpid' }}>Remote-Party-ID</option>
+    </select>
+  </div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Request-URI / To header construction {{ help_icon("Request-URI / To construction", "What actually gets sent as the address of this call, independent of caller ID above. Confirmed this session: previously never configurable at all -- the R-URI domain always silently defaulted to this node's own address, and the R-URI itself never respected any URI scheme setting (only the caller-ID identity did). Three independent choices since a provider's requirements for each can genuinely differ.") }}</span></div>
+<div style="padding:0 16px;font-size:11px;color:#888780;padding-top:12px">Registered-trunk providers sometimes expect the registered/auth identity here instead of the dialed number, or their own hostname instead of this node's address. To defaults to matching the R-URI exactly -- only a minority of providers need the two built differently.</div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div class="fg"><label class="fl">R-URI user {{ help_icon("R-URI user", "\"Dialed number\" (default): the actual number being called. \"Registered/auth identity\": this trunk's own Auth username (or Register from-user, if registration is enabled) -- some registration-based providers expect their own registered identity here rather than the number.") }}</label>
+    <select name="outbound_ruri_user_source">
+      <option value="dialed_number" {{ 'selected' if trunk and trunk.outbound_ruri_user_source=='dialed_number' }}>Dialed number</option>
+      <option value="registered_identity" {{ 'selected' if trunk and trunk.outbound_ruri_user_source=='registered_identity' }}>Registered/auth identity</option>
+    </select>
+  </div>
+  <div class="fg"><label class="fl">R-URI domain {{ help_icon("R-URI domain", "\"This node's address\" (default, today's existing behavior). \"Trunk's hostname\": this trunk's own configured IP/hostname. \"Registrar domain\": the domain this trunk registers to, if registration is configured -- falls back to this trunk's own hostname (never to this node's own address) if no registration URI is set.") }}</label>
+    <select name="outbound_ruri_domain_source">
+      <option value="node_address" {{ 'selected' if trunk and trunk.outbound_ruri_domain_source=='node_address' }}>This node's address</option>
+      <option value="trunk_hostname" {{ 'selected' if trunk and trunk.outbound_ruri_domain_source=='trunk_hostname' }}>Trunk's hostname</option>
+      <option value="registrar_domain" {{ 'selected' if trunk and trunk.outbound_ruri_domain_source=='registrar_domain' }}>Registrar domain</option>
+    </select>
+  </div>
+  <div class="fg"><label class="fl">R-URI scheme {{ help_icon("R-URI scheme", "Independent of Number URI format above, which only ever applies to the caller-ID identity (From/PAI/RPID) -- confirmed this session the R-URI itself never respected any format setting at all. Same three options, applied to the R-URI specifically.") }}</label>
+    <select name="outbound_ruri_uri_format">
+      <option value="sip_uri" {{ 'selected' if trunk and trunk.outbound_ruri_uri_format=='sip_uri' }}>SIP URI</option>
+      <option value="sip_uri_user_phone" {{ 'selected' if trunk and trunk.outbound_ruri_uri_format=='sip_uri_user_phone' }}>SIP URI with user=phone</option>
+      <option value="tel_uri" {{ 'selected' if trunk and trunk.outbound_ruri_uri_format=='tel_uri' }}>tel: URI</option>
+    </select>
+  </div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px;grid-column:1/-1"><input type="checkbox" name="outbound_to_same_as_ruri" id="to_same_as_ruri" style="width:auto" {{ 'checked' if not trunk or trunk.outbound_to_same_as_ruri }} onchange="toggleToFields()"><label class="fl">To header matches R-URI exactly {{ help_icon("To header matches R-URI exactly", "Checked (default): the To header is built identically to the R-URI above, no separate settings needed. Uncheck only if this trunk's far end genuinely needs a different user/domain/scheme in To than what's sent in the R-URI -- uncommon, but some carriers key inbound routing off To specifically.") }}</label></div>
+  <div id="to_fields_group" style="display:{{ 'grid' if trunk and not trunk.outbound_to_same_as_ruri else 'none' }};grid-column:1/-1;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+    <div class="fg"><label class="fl">To user {{ help_icon("To user", "Same options and meaning as R-URI user above, applied to the To header specifically. Only takes effect when \"To header matches R-URI exactly\" is unchecked.") }}</label>
+      <select name="outbound_to_user_source">
+        <option value="dialed_number" {{ 'selected' if trunk and trunk.outbound_to_user_source=='dialed_number' }}>Dialed number</option>
+        <option value="registered_identity" {{ 'selected' if trunk and trunk.outbound_to_user_source=='registered_identity' }}>Registered/auth identity</option>
+      </select>
+    </div>
+    <div class="fg"><label class="fl">To domain {{ help_icon("To domain", "Same options and meaning as R-URI domain above, applied to the To header specifically. Only takes effect when \"To header matches R-URI exactly\" is unchecked.") }}</label>
+      <select name="outbound_to_domain_source">
+        <option value="node_address" {{ 'selected' if trunk and trunk.outbound_to_domain_source=='node_address' }}>This node's address</option>
+        <option value="trunk_hostname" {{ 'selected' if trunk and trunk.outbound_to_domain_source=='trunk_hostname' }}>Trunk's hostname</option>
+        <option value="registrar_domain" {{ 'selected' if trunk and trunk.outbound_to_domain_source=='registrar_domain' }}>Registrar domain</option>
+      </select>
+    </div>
+    <div class="fg"><label class="fl">To scheme {{ help_icon("To scheme", "Same options and meaning as R-URI scheme above, applied to the To header specifically. Only takes effect when \"To header matches R-URI exactly\" is unchecked.") }}</label>
+      <select name="outbound_to_uri_format">
+        <option value="sip_uri" {{ 'selected' if trunk and trunk.outbound_to_uri_format=='sip_uri' }}>SIP URI</option>
+        <option value="sip_uri_user_phone" {{ 'selected' if trunk and trunk.outbound_to_uri_format=='sip_uri_user_phone' }}>SIP URI with user=phone</option>
+        <option value="tel_uri" {{ 'selected' if trunk and trunk.outbound_to_uri_format=='tel_uri' }}>tel: URI</option>
+      </select>
+    </div>
+  </div>
+</div></div>
+
+<script>
+function toggleToFields() {
+  var same = document.getElementById('to_same_as_ruri').checked;
+  document.getElementById('to_fields_group').style.display = same ? 'none' : 'grid';
+}
+document.addEventListener('DOMContentLoaded', toggleToFields);
+</script>
+
+<div class="card"><div class="card-head"><span class="card-title">Privacy</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Privacy mode {{ help_icon("Privacy mode", "Applies as a final layer on top of everything above, and can override the presentation method chosen there when the two would otherwise conflict. \"None\" (default): no change. \"Privacy: id\": the From header is anonymized (\"Anonymous\" <sip:anonymous@anonymous.invalid>) and a Privacy: id header is added, but the real identity still travels in P-Asserted-Identity for this trusted next hop -- hides from the far-end person, not the far-end network (RFC 3325's whole point). \"Full\": From anonymized, Privacy: id;header;session added, and P-Asserted-Identity is suppressed entirely -- no real identity leaves the platform on this leg at all.") }}</label>
+    <select name="outbound_privacy_mode">
+      <option value="none" {{ 'selected' if trunk and trunk.outbound_privacy_mode=='none' }}>None</option>
+      <option value="id" {{ 'selected' if trunk and trunk.outbound_privacy_mode=='id' }}>Privacy: id (hide from user, not network)</option>
+      <option value="full" {{ 'selected' if trunk and trunk.outbound_privacy_mode=='full' }}>Full (hide from everyone)</option>
+    </select>
+  </div>
+</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Topology Hiding</span></div>
+<div style="padding:16px 16px 0;font-size:11px;color:#888780">
+  Whether Kamailio masks its own internal network addresses (Via/Contact/Record-Route) in traffic to/from this trunk, via the topoh module. Leaving either as "Inherit" follows this trunk's SIP Profile default (usually enabled) -- override here only if this specific trunk needs different behavior, e.g. a debugging/lab peer that needs real headers for troubleshooting.
+</div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Inbound (traffic from this trunk) {{ help_icon("Topology hiding, inbound", "Whether our topology is masked in traffic relayed onward that originated FROM this trunk. Inherit follows this trunk's SIP Profile default.") }}</label>
+    <select name="topoh_mask_inbound">
+      <option value="" {{ 'selected' if not trunk or trunk.topoh_mask_inbound is none }}>Inherit from SIP Profile</option>
+      <option value="1" {{ 'selected' if trunk and trunk.topoh_mask_inbound == true }}>Enabled</option>
+      <option value="0" {{ 'selected' if trunk and trunk.topoh_mask_inbound == false }}>Disabled</option>
+    </select>
+  </div>
+  <div class="fg"><label class="fl">Outbound (traffic to this trunk) {{ help_icon("Topology hiding, outbound", "Whether our topology is masked in traffic being sent TO this trunk. Inherit follows this trunk's SIP Profile default.") }}</label>
+    <select name="topoh_mask_outbound">
+      <option value="" {{ 'selected' if not trunk or trunk.topoh_mask_outbound is none }}>Inherit from SIP Profile</option>
+      <option value="1" {{ 'selected' if trunk and trunk.topoh_mask_outbound == true }}>Enabled</option>
+      <option value="0" {{ 'selected' if trunk and trunk.topoh_mask_outbound == false }}>Disabled</option>
+    </select>
+  </div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Session timers</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg" style="grid-column:1/-1;font-size:11px;color:var(--muted,#888);margin:0">DTMF mode, SRTP, and NAT handling now all live on the assigned Media Profile, not here -- see the Media Profile linked below. Session timers are a SIP-signaling setting, not an RTPEngine media hint, so it stays on this page. The actual minimum Session-Expires/Min-SE this node will accept, and whether it's strictly enforced (422 rejection) or just passed through, are node-wide settings -- see Node Settings -> sst -> min_se / reject_to_small.</div>
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="session_timers" style="width:auto" {{ 'checked' if trunk and trunk.session_timers }}><label class="fl">Enable SIP session timers {{ help_icon("Enable SIP session timers", "RFC 4028 session timers -- periodic re-INVITE/UPDATE refreshes that let either side detect a dead call (e.g. after a network failure mid-call) and tear it down, rather than leaving an orphaned channel open indefinitely. The actual refresh interval this node will accept (Min-SE) and whether it's strictly enforced are node-wide, not per-trunk -- see Node Settings -> sst.") }}</label></div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Reliability (health checking)</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="qualify_enabled" style="width:auto" {{ 'checked' if not trunk or trunk.qualify_enabled }}><label class="fl">OPTIONS ping (mark down if unresponsive) {{ help_icon("OPTIONS ping", "This node periodically sends an OPTIONS request to this trunk and marks it down (excluded from routing) if it stops responding -- independent of Requires registration above, which (when checked) uses registration success/failure as the authoritative status instead. Not every trunk needs this -- a low-traffic peer trunk with no other liveness signal may leave it off, in which case its reachability is only found out when a real call fails.") }}</label></div>
+  <div class="fg"><label class="fl">Ping interval (seconds) {{ help_icon("Ping interval", "How often OPTIONS pings are sent when the check above is enabled. Shorter intervals detect an outage faster but add a small amount of constant traffic to this trunk.") }}</label><input type="number" name="qualify_interval" value="{{ trunk.qualify_interval if trunk else '' }}" placeholder="10"></div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Digit manipulation (applies before sending to this trunk)</span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Strip digits from front {{ help_icon("Strip digits from front", "Removes this many digits from the start of the dialed number before it's sent to this trunk -- e.g. stripping a leading '1' for a carrier that expects 10-digit NANP numbers rather than 11. Applied before Prepend digits.") }}</label><input type="number" name="strip_digits" value="{{ trunk.strip_digits if trunk else '' }}" placeholder="0"></div>
+  <div class="fg"><label class="fl">Prepend digits {{ help_icon("Prepend digits", "Added to the front of the dialed number after any stripping above -- e.g. prepending '011' for a carrier that expects international-format dialing. Left blank means nothing is added.") }}</label><input name="prepend_digits" value="{{ trunk.prepend_digits or '' if trunk else '' }}" placeholder="None"></div>
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Interop: custom SIP headers <span style="font-weight:400;font-size:11px;color:#888780">(advanced)</span></span></div>
+<div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg" style="grid-column:1/-1;font-size:11px;color:var(--muted,#888);margin:0">Applied to every outbound INVITE sent to this trunk. For carrier/PBX-specific requirements that don't have a dedicated setting elsewhere on this page (e.g. P-Charge-Info, X-Broadworks-*, proprietary vendor headers). Each must be a full "Header-Name: value" line -- headers this platform already manages (Via, From, To, Contact, Call-ID, Route, etc) can't be overridden here.</div>
+  <div class="fg"><label class="fl">Custom header 1</label><input name="custom_header_1" value="{{ trunk.custom_header_1 or '' if trunk else '' }}" placeholder="e.g. X-Carrier-Id: abc123"></div>
+  <div class="fg"><label class="fl">Custom header 2</label><input name="custom_header_2" value="{{ trunk.custom_header_2 or '' if trunk else '' }}" placeholder="e.g. P-Charge-Info: <sip:1234@example.com>"></div>
+  <div class="fg"><label class="fl">Custom header 3</label><input name="custom_header_3" value="{{ trunk.custom_header_3 or '' if trunk else '' }}" placeholder="None"></div>
+
+</div></div>
+
+<button type="submit" class="btn btn-primary"><i class="ti ti-check"></i> {{ 'Save' if trunk and trunk.id else 'Create trunk' }}</button>
+<a href="/nodes/{{ node_id }}/trunks" class="btn">Cancel</a>
+</form>
+
+{% if trunk and trunk.id %}
+<div class="card"><div class="card-head"><span class="card-title">Access control (additional trusted source IPs)</span></div>
+<div style="padding:0 16px;font-size:11px;color:#888780;padding-top:12px">This trunk's own IP/hostname above is always trusted regardless -- attaching an ACL here adds further trusted source IPs/CIDR ranges on top of that, for Peer trunks whose traffic can legitimately arrive from more than one address (a multi-node PBX cluster, an SBC with several egress IPs). Most relevant when Auth mode above is IP-based, since that's the only authentication a Peer trunk without Digest credentials has. Only Allow entries apply here -- Deny entries in an attached ACL have no effect on trunk source-IP trust. Multiple ACLs can be attached to the same trunk -- all of them are checked (an allow in any one is enough). <a href="/acls/new">Manage Access Control Lists</a>.</div>
+{% set attached_acls = acls|selectattr('id', 'in', tagged_acl_ids)|list %}
+{% if attached_acls %}
+<table><thead><tr><th>Access Control List</th><th></th></tr></thead>
+<tbody>{% for a in attached_acls %}<tr>
+  <td>{{ a.name }}</td>
+  <td><form method="POST" action="/trunks/{{ trunk.id }}/acls/{{ a.id }}/delete" style="display:inline"><button type="submit" class="btn btn-sm">Remove</button></form></td>
+</tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty">No additional Access Control Lists attached.</div>{% endif %}
+{% set unattached_acls = acls|rejectattr('id', 'in', tagged_acl_ids)|list %}
+{% if unattached_acls %}
+<div style="padding:16px;border-top:0.5px solid #e8e7e1">
+  <form method="POST" action="/trunks/{{ trunk.id }}/acls/add" style="display:flex;gap:8px;align-items:end">
+    <div class="fg" style="margin:0"><label class="fl">Attach an Access Control List</label>
+      <select name="acl_id"><option value="">Select one...</option>{% for a in unattached_acls %}<option value="{{ a.id }}">{{ a.name }}</option>{% endfor %}</select>
+    </div>
+    <button type="submit" class="btn btn-sm btn-primary">Add</button>
+  </form>
+</div>
+{% endif %}
+</div>
+{% endif %}
+
+<div class="card"><div class="card-head"><span class="card-title">Trust CIDRs (source-IP trust only -- not identity)</span></div>
+<div style="padding:16px">
+<div style="font-size:11px;color:#888780;margin-bottom:12px">Different from Access Control Lists above: ACLs establish this trunk's <em>identity</em> (which specific trunk a call came from, feeding trunk_ip_identity). These two fields are pure <em>trust</em> -- a coarser "is this source even allowed to be considered at all" gate, for when the admin wants a much broader subnet trusted than identity resolution should ever use. Never populated into any identity-resolving structure, regardless of Auth mode. Digest-mode trunks only -- IP-mode trunks rely on ACL/identity exclusively, since a broader trust fallback there would defeat the purpose of IP-mode auth. Leave at 0.0.0.0/0 (trust from anywhere) to match today's default, unrestricted behavior.</div>
+<form method="POST" action="/trunks/{{ trunk.id }}/trust-cidrs" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+  <div class="fg" style="margin:0"><label class="fl">Trust CIDR 1</label><input name="inbound_trust_cidr_1" value="{{ trunk.inbound_trust_cidr_1 or '0.0.0.0/0' }}" placeholder="0.0.0.0/0"></div>
+  <div class="fg" style="margin:0"><label class="fl">Trust CIDR 2</label><input name="inbound_trust_cidr_2" value="{{ trunk.inbound_trust_cidr_2 or '0.0.0.0/0' }}" placeholder="0.0.0.0/0"></div>
+  <button type="submit" class="btn btn-sm btn-primary">Save</button>
+</form>
+</div>
+</div>
+
+{% if trunk and trunk.id %}
+<div class="card"><div class="card-head">
+  <span class="card-title">Allowed Caller ID Numbers</span>
+  <form method="POST" action="/trunks/{{ trunk.id }}/numbers/import" enctype="multipart/form-data" style="display:inline;margin:0">
+    <label class="btn btn-sm" style="cursor:pointer;margin:0">
+      <i class="ti ti-upload"></i> Import CSV
+      <input type="file" name="csv_file" accept=".csv" style="display:none" onchange="this.form.submit()">
+    </label>
+  </form>
+</div>
+<div style="padding:0 16px;font-size:11px;color:#888780;padding-top:12px">This trunk's own number pool -- checked when its Caller ID Mode (Inbound or Outbound, above) is set to "Allow DIDs only" or "Force per number". For inbound, this is what a call originating from this trunk is allowed to present. For outbound, this is what this trunk (e.g. a provider-type trunk) will accept/register as caller ID for calls sent out through it. CSV format: <code>number</code> column required, optional <code>type</code> column (ext/did/alias/sms/wa/cust/cell, defaults to did).</div>
+{% if trunk_numbers %}
+<table><thead><tr><th>Number</th><th>Type</th><th>Source</th><th>Added</th><th></th></tr></thead>
+<tbody>{% for n in trunk_numbers %}<tr>
+  <td class="mono">{{ n.number }}</td>
+  <td><span class="badge">{{ n.number_type }}</span></td>
+  <td><span class="badge badge-info">{{ n.source }}</span></td>
+  <td style="font-size:11px;color:#888780">{{ n.created_at }}</td>
+  <td><form method="POST" action="/trunks/{{ trunk.id }}/numbers/{{ n.number }}/delete" style="display:inline" onsubmit="return confirm('Remove this number?')"><button type="submit" class="btn btn-sm">Remove</button></form></td>
+</tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty">No numbers added yet.</div>{% endif %}
+<div style="padding:16px;border-top:0.5px solid #e8e7e1">
+  <form method="POST" action="/trunks/{{ trunk.id }}/numbers/add" style="display:flex;gap:8px;align-items:end">
+    <div class="fg" style="margin:0"><label class="fl">Add a number</label><input name="number" placeholder="61412345678" required></div>
+    <div class="fg" style="margin:0"><label class="fl">Type</label><select name="number_type">
+      <option value="did">DID</option><option value="ext">Extension</option><option value="alias">Alias</option>
+      <option value="sms">SMS</option><option value="wa">WhatsApp</option><option value="cust">Custom</option><option value="cell">Cell</option>
+    </select></div>
+    <button type="submit" class="btn btn-sm btn-primary">Add</button>
+  </form>
+</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Custom headers to add {{ help_icon("Custom headers to add", "Applied to every outbound INVITE sent to this trunk, up to 10. Each is a full header line -- \"Name: value\". The value may reference variables like ${called_number} or ${trunk_name}, resolved per-call.") }}</span></div>
+{% if trunk_custom_headers %}
+<table><thead><tr><th>Header</th><th>Added</th><th></th></tr></thead>
+<tbody>{% for h in trunk_custom_headers %}<tr>
+  <td class="mono">{{ h.header_line }}</td>
+  <td style="font-size:11px;color:#888780">{{ h.created_at }}</td>
+  <td><form method="POST" action="/trunks/{{ trunk.id }}/custom-headers/{{ h.id }}/delete" style="display:inline" onsubmit="return confirm('Remove this header?')"><button type="submit" class="btn btn-sm">Remove</button></form></td>
+</tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty">No custom headers added yet.</div>{% endif %}
+<div style="padding:16px;border-top:0.5px solid #e8e7e1">
+  <form method="POST" action="/trunks/{{ trunk.id }}/custom-headers/add" style="display:flex;gap:8px;align-items:end">
+    <div class="fg" style="margin:0;flex:1"><label class="fl">Add a header (up to 10)</label><input name="header_line" id="trunk_hdr_line_input" placeholder="X-Original-Called: ${original_called}" style="width:100%" required></div>
+    <div class="fg" style="margin:0"><label class="fl">Insert variable</label>
+      <select onchange="if(this.value){var el=document.getElementById('trunk_hdr_line_input');var start=el.selectionStart||el.value.length;el.value=el.value.slice(0,start)+this.value+el.value.slice(start);el.focus();this.selectedIndex=0;}">
+        <option value="">Choose...</option>
+        {% for category, vars in variable_catalog.items() %}
+        <optgroup label="{{ category }}">
+          {% for v in vars %}<option value="${{ '{' }}{{ v.placeholder_name }}{{ '}' }}" title="{{ v.description }}">{{ v.placeholder_name }}</option>{% endfor %}
+        </optgroup>
+        {% endfor %}
+      </select>
+    </div>
+    <button type="submit" class="btn btn-sm btn-primary">Add</button>
+  </form>
+</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Headers to strip {{ help_icon("Headers to strip", "Removed from every outbound INVITE sent to this trunk, up to 10. RFC 3261-mandatory headers (Via, From, To, Call-ID, CSeq, Max-Forwards) can never be stripped.") }}</span></div>
+{% if trunk_strip_headers %}
+<table><thead><tr><th>Header name</th><th>Added</th><th></th></tr></thead>
+<tbody>{% for h in trunk_strip_headers %}<tr>
+  <td class="mono">{{ h.header_name }}</td>
+  <td style="font-size:11px;color:#888780">{{ h.created_at }}</td>
+  <td><form method="POST" action="/trunks/{{ trunk.id }}/strip-headers/{{ h.id }}/delete" style="display:inline" onsubmit="return confirm('Remove this?')"><button type="submit" class="btn btn-sm">Remove</button></form></td>
+</tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty">No strip-headers added yet.</div>{% endif %}
+<div style="padding:16px;border-top:0.5px solid #e8e7e1">
+  <form method="POST" action="/trunks/{{ trunk.id }}/strip-headers/add" style="display:flex;gap:8px;align-items:end">
+    <div class="fg" style="margin:0"><label class="fl">Header name (up to 10)</label><input name="header_name" placeholder="Diversion" required></div>
+    <button type="submit" class="btn btn-sm btn-primary">Add</button>
+  </form>
+</div>
+</div>
+{% endif %}
+
+<script>
+// Extended numbers/aliasing design: Realm is constrained to domains
+// actually bound to the selected SIP Profile (via platform_sip_
+// profile_domains) -- never a free pick from every domain, since a
+// domain unrelated to the profile could never actually match $rd at
+// runtime. profile_domains is small, node-scoped data, embedded
+// directly rather than fetched via a separate endpoint.
+const PROFILE_DOMAINS = {{ profile_domains | tojson }};
+const CURRENT_REALM_DOMAIN_ID = {{ (trunk.realm_domain_id if trunk and trunk.realm_domain_id else '') | tojson }};
+
+function updateRealmOptions() {
+  const profileSelect = document.getElementById('sip_profile_id');
+  const realmSelect = document.getElementById('realm_domain_id');
+  const selectedProfileId = profileSelect.value;
+  const previousRealmValue = realmSelect.value;
+  realmSelect.innerHTML = '';
+  if (!selectedProfileId) {
+    realmSelect.appendChild(new Option('-- select a SIP Profile first --', ''));
+    return;
+  }
+  const domains = PROFILE_DOMAINS[selectedProfileId] || [];
+  if (domains.length === 0) {
+    realmSelect.appendChild(new Option('-- no domains bound to this SIP Profile yet --', ''));
+    return;
+  }
+  realmSelect.appendChild(new Option('-- select --', ''));
+  let matched = false;
+  domains.forEach(function(d) {
+    const opt = new Option(d.name, d.id);
+    // Preserve the previously-selected realm across a profile change
+    // only if it's still valid for the newly-selected profile;
+    // otherwise fall through to the initial-load pre-selection below.
+    if (String(d.id) === String(previousRealmValue)) { opt.selected = true; matched = true; }
+    realmSelect.appendChild(opt);
+  });
+  if (!matched && CURRENT_REALM_DOMAIN_ID && String(selectedProfileId) === String(document.getElementById('sip_profile_id').getAttribute('data-initial-profile'))) {
+    for (const opt of realmSelect.options) {
+      if (String(opt.value) === String(CURRENT_REALM_DOMAIN_ID)) { opt.selected = true; break; }
+    }
+  }
+}
+
+// Initialize on page load -- edit mode may already have a SIP Profile
+// selected, in which case the Realm dropdown needs populating (and
+// the trunk's existing realm_domain_id pre-selected) immediately,
+// not only after a future onchange.
+document.addEventListener('DOMContentLoaded', function() {
+  const profileSelect = document.getElementById('sip_profile_id');
+  profileSelect.setAttribute('data-initial-profile', profileSelect.value);
+  updateRealmOptions();
+});
+</script>
+{% endblock %}

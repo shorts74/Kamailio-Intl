@@ -1,0 +1,4 @@
+{% for r in outbound_registrations %}
+<tr><td class="mono">{{ r.l_uuid }}</td><td class="mono">{{ r.l_username }}@{{ r.l_domain }}</td><td class="mono">{{ r.r_username }}@{{ r.r_domain }}</td><td>{{ r.realm }}</td>
+  <td>{% if r.registered %}<span class="badge badge-ok">Registered</span>{% else %}<span class="badge badge-warn">Not registered</span>{% endif %}</td></tr>
+{% endfor %}

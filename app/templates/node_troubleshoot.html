@@ -1,0 +1,353 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "_node_tabs.html" %}
+{% include "_pending_banner.html" %}
+
+{% if error %}<div class="card"><div style="padding:16px;color:#a32d2d">{{ error }}</div></div>{% endif %}
+
+<div class="card"><div class="card-head">
+  <span class="card-title">System Checks</span>
+  <div style="display:flex;gap:8px;margin-left:auto">
+    {% if checks_ran %}
+    <a href="/nodes/{{ node.id }}/troubleshoot?run_checks=1" class="btn btn-sm"><i class="ti ti-refresh"></i> Re-run</a>
+    <button type="button" class="btn btn-sm" onclick="document.getElementById('sysChecksResults').style.display='none'; document.getElementById('sysChecksCollapsed').style.display='flex';"><i class="ti ti-x"></i> Close</button>
+    {% endif %}
+    <form method="POST" action="/nodes/{{ node.id }}/sync-now" style="margin:0" onsubmit="return confirm('Sync any pending changes to this node now? If nothing has changed since the last sync, this does nothing at all -- the node will not be contacted.');">
+      <button type="submit" class="btn btn-sm">Sync Now</button>
+    </form>
+    <form method="POST" action="/nodes/{{ node.id }}/full-sync" style="margin:0" onsubmit="return confirm('Force an unconditional, full reload of every routing/registration/htable domain on this node, regardless of whether anything is actually pending? This is the recovery/drift-correction path -- not needed for routine changes, use Sync Now instead.');">
+      <button type="submit" class="btn btn-sm">Full Sync</button>
+    </form>
+    <form method="POST" action="/nodes/{{ node.id }}/restart" style="margin:0" onsubmit="return confirmRestart()">
+      <button type="submit" class="btn btn-sm btn-danger"><i class="ti ti-alert-triangle"></i> Restart</button>
+    </form>
+  </div>
+</div>
+<script>
+function confirmRestart() {
+  if (!confirm('WARNING: this will DROP EVERY CURRENTLY ACTIVE CALL on this node. Kamailio and RTPEngine will both be fully restarted, not just reloaded. A full sync runs first to make sure the restart picks up the latest config. This is NOT the same as Sync Now or Full Sync -- neither of those touches active calls at all. Continue?')) {
+    return false;
+  }
+  return confirm('Final confirmation: restart this node\'s Kamailio and RTPEngine now, dropping all active calls?');
+}
+</script>
+{% if not checks_ran %}
+<div style="padding:16px;display:flex;align-items:center;gap:10px">
+  <i class="ti ti-stethoscope" style="font-size:18px;color:#b4b2a9"></i>
+  <span style="color:#5f5e5a;font-size:12px;flex:1">Not run automatically -- involves several round-trips to the node itself.</span>
+  <a href="/nodes/{{ node.id }}/troubleshoot?run_checks=1" class="btn btn-primary btn-sm"><i class="ti ti-stethoscope"></i> Troubleshoot Node</a>
+</div>
+{% else %}
+<div id="sysChecksCollapsed" style="padding:16px;align-items:center;gap:10px;display:none">
+  <i class="ti ti-stethoscope" style="font-size:18px;color:#b4b2a9"></i>
+  <span style="color:#5f5e5a;font-size:12px;flex:1">Results collapsed.</span>
+  <button type="button" class="btn btn-sm" onclick="document.getElementById('sysChecksResults').style.display='block'; document.getElementById('sysChecksCollapsed').style.display='none';"><i class="ti ti-eye"></i> Show</button>
+</div>
+<div id="sysChecksResults" style="padding:16px">
+{% set ok_count = node_checks|selectattr('status', 'equalto', 'ok')|list|length %}
+{% set warn_count = node_checks|selectattr('status', 'equalto', 'warn')|list|length %}
+{% set fail_count = node_checks|selectattr('status', 'equalto', 'fail')|list|length %}
+<div style="display:flex;gap:16px;margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #eee;font-size:13px">
+  <div style="color:#2d7a3a;font-weight:600">✓ {{ ok_count }} passed</div>
+  {% if warn_count %}<div style="color:#b8860b;font-weight:600">! {{ warn_count }} warning{{ 's' if warn_count != 1 }}</div>{% endif %}
+  {% if fail_count %}<div style="color:#a32d2d;font-weight:600">✗ {{ fail_count }} failed</div>{% endif %}
+  {% if not warn_count and not fail_count %}<div style="color:#888780">Everything checked out clean.</div>{% endif %}
+</div>
+{% for step in node_checks %}
+<div style="display:flex;gap:12px;padding:12px 0;{{ 'border-bottom:1px solid #eee' if not loop.last }}">
+  <div style="flex-shrink:0;width:24px;text-align:center;font-size:16px">
+    {% if step.status == 'ok' %}<span style="color:#2d7a3a">✓</span>
+    {% elif step.status == 'warn' %}<span style="color:#b8860b">!</span>
+    {% elif step.status == 'fail' %}<span style="color:#a32d2d">✗</span>
+    {% else %}<span style="color:#888780">–</span>{% endif %}
+  </div>
+  <div style="flex:1">
+    <div style="font-weight:600;font-size:13px">{{ step.title }}</div>
+    <div style="font-size:12px;color:{{ '#a32d2d' if step.status == 'fail' else '#5f5e5a' }};margin-top:2px">{{ step.message }}</div>
+    {% if step.detail %}
+    <pre style="margin-top:8px;padding:10px;background:#1e1e1e;color:#d4d4d4;font-size:11px;border-radius:4px;white-space:pre-wrap;word-break:break-all;max-height:200px;overflow-y:auto">{{ step.detail }}</pre>
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+</div>
+{% endif %}
+</div>
+
+<div class="card"><div class="card-head">
+  <span class="card-title"><i class="ti ti-shield-check"></i> Security Audit</span>
+  <div style="display:flex;gap:8px;margin-left:auto">
+    {% if security_checks_ran %}
+    <a href="/nodes/{{ node.id }}/troubleshoot?run_security_checks=1" class="btn btn-sm"><i class="ti ti-refresh"></i> Re-run</a>
+    <button type="button" class="btn btn-sm" onclick="document.getElementById('secChecksResults').style.display='none'; document.getElementById('secChecksCollapsed').style.display='flex';"><i class="ti ti-x"></i> Close</button>
+    {% endif %}
+  </div>
+</div>
+{% if not security_checks_ran %}
+<div style="padding:16px;display:flex;align-items:center;gap:10px">
+  <i class="ti ti-shield-check" style="font-size:18px;color:#b4b2a9"></i>
+  <span style="color:#5f5e5a;font-size:12px;flex:1">Comprehensive review of this node's security enforcement -- fail2ban, firewall baseline, SIP port protections, ipsets, and SQLite-vs-live consistency. Not run automatically -- involves several round-trips to the node.</span>
+  <a href="/nodes/{{ node.id }}/troubleshoot?run_security_checks=1" class="btn btn-primary btn-sm"><i class="ti ti-shield-check"></i> Run Security Audit</a>
+</div>
+{% else %}
+<div id="secChecksCollapsed" style="padding:16px;align-items:center;gap:10px;display:none">
+  <i class="ti ti-shield-check" style="font-size:18px;color:#b4b2a9"></i>
+  <span style="color:#5f5e5a;font-size:12px;flex:1">Results collapsed.</span>
+  <button type="button" class="btn btn-sm" onclick="document.getElementById('secChecksResults').style.display='block'; document.getElementById('secChecksCollapsed').style.display='none';"><i class="ti ti-eye"></i> Show</button>
+</div>
+<div id="secChecksResults" style="padding:16px">
+{% set sec_ok_count = security_checks|selectattr('status', 'equalto', 'ok')|list|length %}
+{% set sec_warn_count = security_checks|selectattr('status', 'equalto', 'warn')|list|length %}
+{% set sec_fail_count = security_checks|selectattr('status', 'equalto', 'fail')|list|length %}
+<div style="display:flex;gap:16px;margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #eee;font-size:13px">
+  <div style="color:#2d7a3a;font-weight:600">✓ {{ sec_ok_count }} passed</div>
+  {% if sec_warn_count %}<div style="color:#b8860b;font-weight:600">! {{ sec_warn_count }} warning{{ 's' if sec_warn_count != 1 }}</div>{% endif %}
+  {% if sec_fail_count %}<div style="color:#a32d2d;font-weight:600">✗ {{ sec_fail_count }} failed</div>{% endif %}
+  {% if not sec_warn_count and not sec_fail_count %}<div style="color:#888780">Everything checked out clean.</div>{% endif %}
+</div>
+{% for step in security_checks %}
+<div style="display:flex;gap:12px;padding:12px 0;{{ 'border-bottom:1px solid #eee' if not loop.last }}">
+  <div style="flex-shrink:0;width:24px;text-align:center;font-size:16px">
+    {% if step.status == 'ok' %}<span style="color:#2d7a3a">✓</span>
+    {% elif step.status == 'warn' %}<span style="color:#b8860b">!</span>
+    {% elif step.status == 'fail' %}<span style="color:#a32d2d">✗</span>
+    {% else %}<span style="color:#888780">–</span>{% endif %}
+  </div>
+  <div style="flex:1">
+    <div style="font-weight:600;font-size:13px">{{ step.title }}</div>
+    <div style="font-size:12px;color:{{ '#a32d2d' if step.status == 'fail' else '#5f5e5a' }};margin-top:2px">{{ step.message }}</div>
+    {% if step.detail %}
+    <pre style="margin-top:8px;padding:10px;background:#1e1e1e;color:#d4d4d4;font-size:11px;border-radius:4px;white-space:pre-wrap;word-break:break-all;max-height:200px;overflow-y:auto">{{ step.detail }}</pre>
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+</div>
+{% endif %}
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Trace health (Homer/HEP)</span></div>
+<div style="padding:16px">
+  {% if siptrace_status == 'Disabled' %}
+  <p style="font-size:13px;color:#a32d2d;font-weight:600;margin:0 0 10px"><i class="ti ti-alert-triangle"></i> This node's SIP Trace is Disabled right now -- nothing from this node is reaching Homer. If the deployed config file has <code>trace_on=1</code> but this still shows Disabled, the running process hasn't picked up that config yet (needs a restart) -- this exact mismatch is what made an earlier live debugging session take an hour instead of a glance.</p>
+  {% endif %}
+  <p style="font-size:11px;color:#888780;margin:0 0 10px">heplify-server runs once, shared by every node -- these ingest totals are Manager-wide, not broken out per node.</p>
+  <div class="metrics" style="margin-bottom:12px">
+    <div class="metric"><div class="metric-label">This node sends via</div><div class="metric-val" style="font-size:14px">{{ 'TLS' if node.hep_transport == 'tls' else 'UDP' }}</div></div>
+    <div class="metric"><div class="metric-label">Homer UDP:9060</div><div class="metric-val" style="font-size:14px">
+      {% if heplify_listeners.udp %}<span style="color:#2d7a3a">Up</span>{% elif heplify_listeners.udp == false %}<span style="color:#a32d2d">Down</span>{% else %}unknown{% endif %}
+    </div></div>
+    <div class="metric"><div class="metric-label">Homer TLS:9062</div><div class="metric-val" style="font-size:14px">
+      {% if heplify_listeners.tls %}<span style="color:#2d7a3a">Up</span>{% elif heplify_listeners.tls == false %}<span style="color:#a32d2d">Down</span>{% else %}unknown{% endif %}
+    </div></div>
+  </div>
+  {% if node.hep_transport == 'tls' and heplify_listeners.tls == false %}
+  <p style="font-size:13px;color:#a32d2d;font-weight:600;margin:0 0 10px"><i class="ti ti-alert-triangle"></i> This node is set to send HEP via TLS, but Homer's TLS listener isn't up -- traces from this node aren't reaching Homer at all right now. Check the nominated HEP certificate loaded correctly (see <a href="/certificates">Certificates</a>) and that heplify-server actually restarted after it was pushed.</p>
+  {% endif %}
+  {% if heplify_stats.available %}
+  <div class="metrics">
+    <div class="metric"><div class="metric-label">Packets/sec</div><div class="metric-val">{{ heplify_stats.pps }}</div></div>
+    <div class="metric"><div class="metric-label">HEP (5 min)</div><div class="metric-val">{{ heplify_stats.hep }}</div></div>
+    <div class="metric"><div class="metric-label">Filtered</div><div class="metric-val">{{ heplify_stats.filtered }}</div></div>
+    <div class="metric"><div class="metric-label">Errors</div><div class="metric-val" style="{{ 'color:#a32d2d' if heplify_stats.error > 0 }}">{{ heplify_stats.error }}</div></div>
+  </div>
+  <div style="font-size:11px;color:#888780;margin-top:8px">As of {{ heplify_stats.as_of or 'unknown time' }} (heplify-server's own 5-minute stats window)</div>
+  {% if heplify_stats.hep == 0 %}
+  <p style="font-size:13px;color:#a32d2d;font-weight:600;margin:10px 0 0"><i class="ti ti-alert-triangle"></i> Zero HEP packets in the last window -- if this persists across several windows while calls are happening, check: this node's SIP Trace status above, the deployed <code>HOMER_HEP</code> value in kamailio.cfg, and (commonly the real cause) a cloud security group blocking inbound UDP 9060 on the Manager -- local iptables being open isn't enough, that's a separate layer.</p>
+  {% endif %}
+  {% else %}
+  <p style="font-size:13px;color:#a32d2d">Could not read heplify-server's stats{% if heplify_stats.error %}: {{ heplify_stats.error }}{% endif %}</p>
+  {% endif %}
+</div></div>
+
+<div class="card"><div class="card-head"><span class="card-title">Live parameter lookup</span></div>
+<div style="padding:16px">
+  <p style="font-size:11px;color:#888780;margin:0 0 10px">
+    Runs <code>kamcmd cfg.get &lt;module&gt; &lt;param&gt;</code> on this node over SSH -- shows the parameter's actual current runtime value, not what the database expects. Useful for confirming an Apply really took effect, or spotting drift from a manual change.
+    Try <code>core</code> / <code>debug</code>, or start typing to see suggestions (Tab completes the first match).
+  </p>
+  <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+    <div class="fg" style="margin:0;position:relative">
+      <label class="fl">Module</label>
+      <input id="cfgget-module" autocomplete="off" style="width:160px" placeholder="core">
+      <div id="cfgget-module-sug" class="autocomplete-list" style="display:none"></div>
+    </div>
+    <div class="fg" style="margin:0;position:relative">
+      <label class="fl">Param</label>
+      <input id="cfgget-param" autocomplete="off" style="width:160px" placeholder="debug">
+      <div id="cfgget-param-sug" class="autocomplete-list" style="display:none"></div>
+    </div>
+    <button type="button" class="btn btn-sm" onclick="cfgGetLookup()">Get value</button>
+  </div>
+  <div id="cfgget-result" style="margin-top:10px;font-size:13px"></div>
+</div></div>
+<style>
+.autocomplete-list { position:absolute; top:100%; left:0; right:0; background:#fff; border:1px solid #ddd; border-radius:4px; z-index:10; max-height:160px; overflow-y:auto; }
+.autocomplete-list div { padding:6px 8px; font-size:12px; cursor:pointer; }
+.autocomplete-list div:hover { background:#f0f0f0; }
+</style>
+<script>
+function cfgGetAutocomplete(inputId, sugId, field, extra) {
+  const input = document.getElementById(inputId);
+  const sug = document.getElementById(sugId);
+
+  async function showResults(q, limit) {
+    const params = new URLSearchParams({field: field, q: q});
+    if (extra) params.set('module', document.getElementById('cfgget-module').value.trim());
+    const res = await fetch('{{ url_for("web.module_reference_autocomplete") }}?' + params.toString(), {headers: {'Accept': 'application/json'}});
+    const items = (await res.json()).slice(0, limit);
+    if (!items.length) { sug.style.display = 'none'; return; }
+    sug.innerHTML = items.map(i => `<div onclick="document.getElementById('${inputId}').value='${i}'; document.getElementById('${sugId}').style.display='none';">${i}</div>`).join('');
+    sug.style.display = 'block';
+  }
+
+  input.addEventListener('input', () => {
+    const q = input.value.trim();
+    // Empty after typing (backspaced out) falls back to the same
+    // small default set as focus, rather than hiding entirely --
+    // consistent behavior whether the field was just cleared or
+    // never touched yet.
+    showResults(q, q ? 20 : 10);
+  });
+  // Real gap fixed here: previously nothing showed at all until the
+  // admin had already typed something -- meaning they had to already
+  // know a module/param name to find it, defeating the point of a
+  // lookup tool. On focus, with the field still empty, show a small
+  // default set (10) so there's always something to click even
+  // before typing -- switches to full filtered search (20) the
+  // moment they start typing, via the same input handler above.
+  input.addEventListener('focus', () => {
+    if (!input.value.trim()) showResults('', 10);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab' && sug.style.display !== 'none' && sug.firstChild) {
+      input.value = sug.firstChild.textContent;
+      sug.style.display = 'none';
+    }
+    if (e.key === 'Enter') sug.style.display = 'none';
+  });
+  document.addEventListener('click', (e) => { if (e.target !== input) sug.style.display = 'none'; });
+}
+cfgGetAutocomplete('cfgget-module', 'cfgget-module-sug', 'module', false);
+cfgGetAutocomplete('cfgget-param', 'cfgget-param-sug', 'param', true);
+
+async function cfgGetLookup() {
+  const module = document.getElementById('cfgget-module').value.trim();
+  const param = document.getElementById('cfgget-param').value.trim();
+  const resultDiv = document.getElementById('cfgget-result');
+  if (!module || !param) { resultDiv.innerHTML = '<span style="color:#a32d2d">Enter both a module and a param.</span>'; return; }
+  resultDiv.innerHTML = 'Looking up...';
+  try {
+    const res = await fetch('{{ url_for("web.node_cfg_get", node_id=node.id) }}', {
+      method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json'},
+      body: new URLSearchParams({module: module, param: param})
+    });
+    const data = await res.json();
+    if (data.error) { resultDiv.innerHTML = `<span style="color:#a32d2d">${data.error}</span>`; return; }
+    resultDiv.innerHTML = data.ok
+      ? `<span class="mono" style="background:#f5f5f0;padding:6px 10px;border-radius:4px;display:inline-block">${data.result}</span>`
+      : `<span style="color:#a32d2d">${data.result}</span>`;
+  } catch (e) {
+    resultDiv.innerHTML = '<span style="color:#a32d2d">Request failed.</span>';
+  }
+}
+</script>
+
+<div class="card"><div class="card-head"><span class="card-title">Routing plans loaded on this node</span></div>
+<div style="padding:0 16px;font-size:11px;color:#888780">Read directly from the node's own local SQLite cache, not the Manager's database -- shows what's actually there right now, which can genuinely differ if sync hasn't run yet or failed partway.</div>
+{% if routing_on_node and routing_on_node.error %}
+<div class="empty">Could not reach node: {{ routing_on_node.error }}</div>
+{% elif routing_on_node and routing_on_node.profiles %}
+<table><thead><tr><th>Name</th><th>Engine</th><th>Rules</th><th>Reject</th></tr></thead>
+<tbody>{% for p in routing_on_node.profiles %}<tr>
+  <td class="mono">{{ p.name }}</td>
+  <td><span class="badge {{ 'badge-warn' if p.engine_type == 'lcr' else 'badge-info' }}">{{ p.engine_type }}</span></td>
+  <td>{{ p.rule_count }}</td>
+  <td class="mono">{{ p.reject_code }} {{ p.reject_reason }}</td>
+</tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty">No routing plans found on this node (or node unreachable).</div>{% endif %}
+{% if routing_on_node and routing_on_node.unrouted_sources %}
+<div style="padding:12px 16px;border-top:0.5px solid #e8e7e1">
+  <p style="font-size:13px;color:#a32d2d;font-weight:600;margin:0 0 6px"><i class="ti ti-alert-triangle"></i> {{ routing_on_node.unrouted_sources|length }} trunk source IP{{ 's' if routing_on_node.unrouted_sources|length != 1 }} trusted but unrouted</p>
+  <p style="font-size:11px;color:#888780;margin:0 0 8px">Present in this node's local dispatcher table (so calls from these sources ARE trusted) but with no matching trunk_ip_identity entry at all -- every inbound call from these will silently reject with 404 No Route Found. This is the exact failure mode this check exists to catch: usually a trunk with no routing plan assigned at all, or one that hasn't synced since being assigned one.</p>
+  <div style="display:flex;gap:6px;flex-wrap:wrap">{% for ip in routing_on_node.unrouted_sources %}<span class="badge badge-bad mono">{{ ip }}</span>{% endfor %}</div>
+</div>
+{% endif %}
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title"><i class="ti ti-network"></i> Troubleshoot Toolkit -- packet capture</span></div>
+<div style="padding:16px">
+  <p style="font-size:11px;color:#888780;margin:0 0 10px">
+    Bounded, temporary tcpdump on this node -- admin-only. Filters below build a BPF expression for you; duration and size are always capped server-side ({{ pcap_max_duration_hours }}h max, {{ pcap_max_size_mb }}MB max) regardless of what's entered. Unfiltered or broad captures can contain SIP auth credentials and RTP audio -- same sensitivity as call recording.
+  </p>
+  <script>
+  function pcapPresetChanged() {
+    var preset = document.getElementById('pcap_preset').value;
+    var isSip = (preset === 'sip' || preset === 'sip_rtp');
+    document.getElementById('pcap_sip_profile_group').style.display = isSip ? 'flex' : 'none';
+    document.getElementById('pcap_protocol_fields').style.display = (preset === 'custom') ? 'flex' : 'none';
+  }
+  </script>
+  {% set running_captures = captures|selectattr('status', 'equalto', 'running')|list %}
+  {% if running_captures %}
+  <div style="padding:10px 12px;background:#fff3cd;border-radius:4px;font-size:12px;margin-bottom:12px">
+    <i class="ti ti-alert-triangle"></i> {{ running_captures|length }} capture(s) already running on this node -- starting another with the exact same filter settings will be refused, but a different filter can run alongside them:
+    <ul style="margin:4px 0 0 18px;padding:0">
+      {% for rc in running_captures %}<li>{{ rc.interface }} / {{ rc.bpf_expr or 'no filter' }} (started {{ rc.started_at }})</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+  <form method="POST" action="/nodes/{{ node.id }}/troubleshoot/pcap/start" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+    <div class="fg" style="margin:0"><label class="fl">Interface {{ help_icon("Interface", "Which network interface to capture on. \"any\" captures every interface at once -- the safe default unless you know traffic is specifically on one interface (e.g. a dedicated management NIC).") }}</label><select name="interface" style="width:100px">
+      <option value="any">any</option>
+      {% for iface in pcap_interfaces %}<option value="{{ iface }}">{{ iface }}</option>{% endfor %}
+    </select></div>
+    <div class="fg" style="margin:0"><label class="fl">Filter {{ help_icon("Filter", "A quick preset BPF filter for common troubleshooting scenarios. Pick Custom to build your own from Protocol/Port/CIDR fields below instead.") }}</label><select name="preset" id="pcap_preset" onchange="pcapPresetChanged()" style="width:150px">
+      <option value="custom">Custom (below)</option>
+      <option value="sip">SIP only (+ DNS, ICMP)</option>
+      <option value="sip_rtp">SIP + RTP (+ DNS, ICMP)</option>
+      <option value="dns">DNS</option>
+      <option value="snmp">SNMP</option>
+      <option value="hep">HEP (Homer)</option>
+    </select></div>
+    <div class="fg" id="pcap_sip_profile_group" style="margin:0;display:none"><label class="fl">SIP Profile{{ help_icon("SIP Profile", "SIP traffic may arrive on any of this node's enabled SIP Profiles. \"All\" captures every profile's port at once; pick a specific one to scope the capture if you only care about traffic on one.") }}</label><select name="sip_profile_id" style="width:150px">
+      <option value="all">All profiles</option>
+      {% for p in pcap_sip_profiles %}<option value="{{ p.id }}">{{ p.name }} ({{ p.ip_addr }}:{{ p.port }})</option>{% endfor %}
+    </select></div>
+    <div id="pcap_protocol_fields" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+      <div class="fg" style="margin:0"><label class="fl">Protocol {{ help_icon("Protocol", "Only used with the Custom filter -- restricts the capture to this transport protocol. Leave as \"any\" to capture all.") }}</label><select name="protocol">
+        <option value="">any</option><option value="udp">udp</option><option value="tcp">tcp</option><option value="icmp">icmp</option>
+      </select></div>
+      <div class="fg" style="margin:0"><label class="fl">Port {{ help_icon("Port", "Only used with the Custom filter -- restricts the capture to this port. Leave blank to capture all ports.") }}</label><input name="port" type="number" style="width:70px" placeholder="any"></div>
+      <div class="fg" style="margin:0"><label class="fl">to Port (range, optional) {{ help_icon("to Port", "Pairs with Port above to capture a port RANGE instead of a single port -- e.g. an RTP media port range.") }}</label><input name="port_end" type="number" style="width:70px" placeholder="e.g. RTP range"></div>
+    </div>
+    <div class="fg" style="margin:0"><label class="fl">Source CIDR{{ help_icon("Source CIDR", "Applies on top of any filter above, preset or custom -- defaults to any if left blank.") }}</label><input name="src_cidr" style="width:130px" placeholder="any"></div>
+    <div class="fg" style="margin:0"><label class="fl">Dest CIDR{{ help_icon("Dest CIDR", "Applies on top of any filter above, preset or custom -- defaults to any if left blank.") }}</label><input name="dst_cidr" style="width:130px" placeholder="any"></div>
+    <div class="fg" style="margin:0"><label class="fl">Duration (sec) {{ help_icon("Duration", "Capture stops automatically after this many seconds, whichever comes first against Max size below.") }}</label><input name="duration_sec" type="number" value="60" style="width:70px"></div>
+    <div class="fg" style="margin:0"><label class="fl">Max size (MB) {{ help_icon("Max size", "Capture stops automatically once the file reaches this size, whichever comes first against Duration above -- prevents an unexpectedly busy/loose filter from filling disk.") }}</label><input name="max_size_mb" type="number" value="500" style="width:70px"></div>
+    <button type="submit" class="btn btn-sm btn-primary"><i class="ti ti-player-record"></i> Start capture</button>
+  </form>
+
+  <table style="margin-top:14px"><thead><tr><th>Started</th><th>Age</th><th>Interface / Filter</th><th>Duration</th><th>Status</th><th>Size</th><th>Packets</th><th></th></tr></thead>
+  <tbody>{% for c in captures %}<tr>
+    <td style="font-size:11px">{{ c.started_at }}</td>
+    <td style="font-size:11px">{{ c.started_at|time_ago }}</td>
+    <td class="mono" style="font-size:11px">{{ c.interface }} / {% if c.bpf_expr %}{{ c.bpf_expr }}{% else %}{% if c.protocol %}{{ c.protocol }}{% endif %}{% if c.port %}:{{ c.port }}{% if c.port_end %}-{{ c.port_end }}{% endif %}{% endif %}{% if c.src_cidr %} src {{ c.src_cidr }}{% endif %}{% if c.dst_cidr %} dst {{ c.dst_cidr }}{% endif %}{% if not c.protocol and not c.port and not c.src_cidr and not c.dst_cidr %}any{% endif %}{% endif %}</td>
+    <td>{{ c.duration_sec }}s</td>
+    <td>{% if c.status == 'running' %}<span class="badge badge-warn">Running</span>
+        {% elif c.status == 'completed' %}<span class="badge badge-ok">Completed</span>
+        {% elif c.status == 'expired' %}<span class="badge badge-info">Expired</span>
+        {% else %}<span class="badge badge-bad">Failed</span>{% if c.error_message %}<div style="font-size:10px;color:#a32d2d;margin-top:2px">{{ c.error_message }}</div>{% endif %}{% endif %}</td>
+    <td>{{ (c.file_size_bytes // 1024) if c.file_size_bytes else '-' }}{% if c.file_size_bytes %} KB{% endif %}</td>
+    <td>{{ c.packet_count if c.packet_count is not none else '-' }}</td>
+    <td style="white-space:nowrap">
+      {% if c.status == 'running' %}
+      <a href="/nodes/{{ node.id }}/troubleshoot/pcap/{{ c.id }}/refresh" class="btn btn-sm"><i class="ti ti-refresh"></i> Refresh</a>
+      <a href="/nodes/{{ node.id }}/troubleshoot/pcap/{{ c.id }}/stop" class="btn btn-sm" onclick="return confirm('Stop this capture now?')"><i class="ti ti-player-stop"></i> Stop</a>
+      {% elif c.status == 'completed' %}<a href="/pcap-captures/{{ c.id }}/download" class="btn btn-sm"><i class="ti ti-download"></i> Download</a>{% endif %}
+      <a href="/nodes/{{ node.id }}/troubleshoot/pcap/{{ c.id }}/delete" class="btn btn-sm btn-danger" onclick="return confirm('Delete this capture?')"><i class="ti ti-trash"></i></a>
+    </td>
+  </tr>{% endfor %}</tbody></table>
+  {% if not captures %}<div class="empty">No captures yet.</div>{% endif %}
+</div></div>
+{% endblock %}

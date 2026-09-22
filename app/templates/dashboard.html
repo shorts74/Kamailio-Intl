@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">Dashboard</h1>
+<div class="metrics">
+  <div class="metric"><div class="metric-label">Nodes online</div><div class="metric-val">{{ active_nodes }}/{{ nodes_total }}</div></div>
+  <div class="metric"><div class="metric-label">Trunks (up/down/total)</div><div class="metric-val" style="font-size:20px">{{ trunk_up }}/{{ trunk_down }}/{{ trunk_count }}</div></div>
+  <div class="metric"><div class="metric-label">Registered (in/out)</div><div class="metric-val" style="font-size:20px">{{ current_regs_in }}/{{ current_regs_out }}</div></div>
+  <div class="metric"><div class="metric-label">Calls (today/hr/min)</div><div class="metric-val" style="font-size:20px">{{ calls_today }}/{{ calls_hour }}/{{ calls_last_min }}</div></div>
+</div>
+{% if trunk_unreachable > 0 or trunk_not_checked > 0 %}
+<p style="font-size:12px;color:#888780;margin:-8px 0 16px">
+  {% if trunk_unreachable > 0 %}{{ trunk_unreachable }} trunk{{ 's' if trunk_unreachable != 1 }} on an unreachable node.{% endif %}
+  {% if trunk_not_checked > 0 %}{{ trunk_not_checked }} not checked yet.{% endif %}
+</p>
+{% endif %}
+
+<div class="card">
+  <div class="card-head"><span class="card-title"><i class="ti ti-server-2"></i> Nodes</span>
+    <div style="display:flex;gap:8px;align-items:center">
+      <a href="/" class="btn btn-sm"><i class="ti ti-refresh"></i> Refresh</a>
+      <a href="/nodes" class="btn btn-sm">Manage <i class="ti ti-arrow-right"></i></a>
+    </div></div>
+  <div data-live-region="nodes_q">
+  <div style="padding:12px 16px 0">
+  {% call toolbar(page=nodes_page, total_pages=nodes_total_pages, total=nodes_total, page_param="nodes_page", q_param="nodes_q") %}
+    <div class="fg" style="margin:0"><label class="fl">Search</label><input name="nodes_q" value="{{ request.args.get('nodes_q', '') }}" placeholder="node name..." data-live-search data-page-param="nodes_page"></div>
+  {% endcall %}
+  </div>
+  {% if nodes %}
+  <table><thead><tr><th>Node</th><th>Region</th><th>Status</th><th>Trunks (up/down)</th><th>Registered (in/out)</th><th>Calls (today/hr/min)</th><th>Alerts</th></tr></thead>
+  <tbody>{% for n in nodes %}<tr>
+    <td><a href="/nodes/{{ n.id }}"><b>{{ n.name }}</b></a></td><td><span class="badge badge-info">{{ n.region }}</span></td>
+    <td>{% if n.enabled %}<span class="badge badge-ok">Enabled</span>{% else %}<span class="badge badge-bad">Disabled</span>{% endif %}</td>
+    <td><span class="badge badge-{{ 'ok' if n.stats.trunk_down == 0 else 'warn' }}">{{ n.stats.trunk_up }}/{{ n.stats.trunk_down }}</span></td>
+    <td>{{ n.stats.registered_in }} / {{ n.stats.registered_out }}</td>
+    <td>{{ n.stats.calls_today }} / {{ n.stats.calls_hour }} / {{ n.stats.calls_min }}
+      {% if n.stats.comprehensive.calls_hour %}<div style="font-size:11px;color:#888780">{{ n.stats.comprehensive.answered_hour }} answered{% if n.stats.comprehensive.failed_hour %}, <span style="color:#c62828">{{ n.stats.comprehensive.failed_hour }} failed</span>{% endif %}{% if n.stats.comprehensive.avg_mos_hour %}, MOS {{ '%.2f'|format(n.stats.comprehensive.avg_mos_hour) }}{% endif %}</div>{% endif %}
+    </td>
+    <td>{% if n.stats.active_alerts > 0 %}<span class="badge badge-bad">{{ n.stats.active_alerts }}</span>{% else %}-{% endif %}</td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No nodes match. <a href="/nodes/new">Add one</a>.</div>{% endif %}
+  </div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title"><i class="ti ti-alert-triangle"></i> Alerts</span></div>
+<div data-live-region="alerts_q">
+<div style="padding:12px 16px 0">
+{% call toolbar(page=alert_page, total_pages=alert_total_pages, total=alert_total, page_param="alerts_page", q_param="alerts_q") %}
+  <div class="fg" style="margin:0"><label class="fl">Show</label><select name="alert_filter">
+    <option value="active" {{ 'selected' if alert_filter=='active' }}>Active</option>
+    <option value="resolved" {{ 'selected' if alert_filter=='resolved' }}>Resolved</option>
+    <option value="all" {{ 'selected' if alert_filter=='all' }}>All</option>
+  </select></div>
+  <div class="fg" style="margin:0"><label class="fl">Node</label><select name="alert_node">
+    <option value="">All nodes</option>{% for n in nodes_all %}<option value="{{ n.id }}" {{ 'selected' if alert_node==n.id|string }}>{{ n.name }}</option>{% endfor %}
+  </select></div>
+  <div class="fg" style="margin:0"><label class="fl">Region</label><select name="alert_region">
+    <option value="">All regions</option>{% for r in regions %}<option value="{{ r.region }}" {{ 'selected' if alert_region==r.region }}>{{ r.region }}</option>{% endfor %}
+  </select></div>
+  <div class="fg" style="margin:0"><label class="fl">Type</label><select name="alert_type">
+    <option value="">All types</option>
+    <option value="trunk_down" {{ 'selected' if alert_type=='trunk_down' }}>trunk_down</option>
+    <option value="sync_stalled" {{ 'selected' if alert_type=='sync_stalled' }}>sync_stalled</option>
+    <option value="fail2ban_policy_drift" {{ 'selected' if alert_type=='fail2ban_policy_drift' }}>fail2ban_policy_drift</option>
+  </select></div>
+{% endcall %}
+</div>
+<table><thead><tr><th>Type</th><th>Entity</th><th>Message</th><th>Started</th><th>Resolved</th></tr></thead>
+<tbody>{% for a in alerts %}<tr>
+  <td><span class="badge badge-{{ 'bad' if a.severity=='critical' else 'warn' }}">{{ a.alert_type }}</span></td>
+  <td>{{ a.entity_name }}</td><td>{{ a.message }}</td>
+  <td>{{ a.started_at }}</td>
+  <td>{% if a.resolved_at %}{{ a.resolved_at }}{% else %}<span class="badge badge-bad">Open</span>{% endif %}</td>
+</tr>{% endfor %}</tbody></table>
+{% if not alerts %}<div class="empty">No {{ alert_filter }} alerts.</div>{% endif %}
+</div>
+</div>
+{% endblock %}

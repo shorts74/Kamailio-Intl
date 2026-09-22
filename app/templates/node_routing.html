@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% from "_sync_pending_button.html" import sync_pending_group %}
+{% block content %}
+{% include "_node_tabs.html" %}
+{% include "_pending_banner.html" %}
+
+<div class="card"><div class="card-head"><span class="card-title">Routing plans</span>
+  {{ sync_pending_group(node.id, routing_sync_pending, "/nodes/" ~ node.id ~ "/routing-profiles/new", "Add routing plan") }}</div>
+<div style="padding:12px 16px 0">
+<div data-live-region="q">
+{% call toolbar(page=page, total_pages=total_pages, total=total) %}
+  <div class="fg" style="margin:0"><label class="fl">Search</label><input name="q" value="{{ request.args.get('q', '') }}" placeholder="Plan name" data-live-search data-page-param="page"></div>
+{% endcall %}
+{% if routing_profiles %}
+<table><thead><tr><th>Name</th><th>Engine</th><th>Fallback plan</th><th>Rules</th><th>Trunks</th><th>Groups</th><th>Domains</th><th>Users</th><th></th></tr></thead>
+<tbody>{% for p in routing_profiles %}<tr>
+  <td><a href="/routing-profiles/{{ p.id }}"><b>{{ p.name }}</b></a></td>
+  <td><span class="badge {{ 'badge-warn' if p.engine_type == 'lcr' else 'badge-info' }}">{{ {'prefix': 'Prefix/DID', 'regex': 'Regex', 'lcr': 'LCR', 'subscriber_lookup': 'Subscriber lookup'}[p.engine_type] or p.engine_type }}</span></td>
+  <td>{{ p.fallback_name or '-' }}</td>
+  <td>{{ p.rule_count }}</td>
+  <td>{{ p.trunk_count }}</td>
+  <td>{{ p.group_count }}</td>
+  <td>{{ p.domain_count }}</td>
+  <td>{{ p.user_count }}</td>
+  <td>
+    <a href="/routing-profiles/{{ p.id }}" class="btn btn-sm">View/Manage</a>
+    {% if p.can_delete %}
+    <a href="/routing-profiles/{{ p.id }}/delete" class="btn btn-sm" onclick="return confirm('Delete routing plan \'{{ p.name }}\'? This cannot be undone.')">Delete</a>
+    {% else %}
+    <span class="btn btn-sm" style="opacity:0.4;cursor:not-allowed" title="Still in use -- see Trunks/Groups/Domains/Users/Rules counts above, or check the Fallback/SIP Profile default settings of other plans">Delete</span>
+    {% endif %}
+  </td>
+</tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty">No routing plans yet.</div>{% endif %}
+</div>
+</div>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title"><i class="ti ti-route"></i> Route Plan Test</span></div>
+<div style="padding:16px">
+  <p style="font-size:11px;color:#888780;margin:0 0 10px">
+    Simulates a call through this node's real, current routing configuration -- reuses the exact same matching logic a live call would go through (profile chain, prefix/regex/LCR rules, strip/prepend, dispatcher selection), but never actually dispatches anywhere. Safe to run against a live node.
+  </p>
+  <div style="display:flex;gap:16px;margin-bottom:10px">
+    <label style="display:flex;align-items:center;gap:4px;font-size:12px"><input type="radio" name="rt_mode" value="trunk" checked onchange="rtModeChanged()"> Test as inbound trunk call</label>
+    <label style="display:flex;align-items:center;gap:4px;font-size:12px"><input type="radio" name="rt_mode" value="user" onchange="rtModeChanged()"> Test as registered user call</label>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;align-items:end">
+    <div id="rt_trunk_field" class="fg" style="margin:0"><label class="fl">Trunk</label>
+      <select id="rt_trunk_id" data-searchable data-placeholder="Search trunks...">
+        <option value="">Select a trunk...</option>
+        {% for t in rt_trunks %}<option value="{{ t.id }}">{{ t.name }} ({{ t.ip_addr }})</option>{% endfor %}
+      </select></div>
+    <div id="rt_domain_field" class="fg" style="margin:0;display:none"><label class="fl">Domain</label>
+      <select id="rt_domain_id" data-searchable data-placeholder="Search domains...">
+        <option value="">Select a domain...</option>
+        {% for d in rt_domains %}<option value="{{ d.domain_id }}" data-sip-profile-id="{{ d.sip_profile_id }}">{{ d.friendly_name }} -- {{ d.sip_profile_name }} ({{ d.ip_addr }}:{{ d.port }})</option>{% endfor %}
+      </select></div>
+    <div id="rt_username_field" class="fg" style="margin:0;display:none"><label class="fl">Username</label><input id="rt_username" placeholder="e.g. jsmith"></div>
+    <div class="fg" style="margin:0"><label class="fl">Called number</label><input id="rt_called" placeholder="e.g. 18005551234"></div>
+    <div class="fg" style="margin:0"><label class="fl">Calling number <span style="font-weight:400;color:#888780">(optional)</span></label><input id="rt_calling" placeholder="e.g. 15551234567"></div>
+    <div><button type="button" class="btn btn-sm btn-primary" onclick="runRouteTest({{ node.id }})">Run Test</button></div>
+  </div>
+  {% if not rt_trunks and not rt_domains %}
+  <p style="font-size:11px;color:#a37a00;margin:10px 0 0">No trunks or domain/SIP-Profile bindings found on this node yet -- add a trunk, or enable a domain on a SIP Profile here, to test against.</p>
+  {% endif %}
+  <div id="rt_result" style="margin-top:14px"></div>
+</div>
+</div>
+
+<script>
+function rtModeChanged() {
+  const mode = document.querySelector('input[name="rt_mode"]:checked').value;
+  document.getElementById('rt_trunk_field').style.display = mode === 'trunk' ? '' : 'none';
+  document.getElementById('rt_domain_field').style.display = mode === 'user' ? '' : 'none';
+  document.getElementById('rt_username_field').style.display = mode === 'user' ? '' : 'none';
+}
+
+async function runRouteTest(nodeId) {
+  const mode = document.querySelector('input[name="rt_mode"]:checked').value;
+  const called = document.getElementById('rt_called').value.trim();
+  const calling = document.getElementById('rt_calling').value.trim();
+  const resultDiv = document.getElementById('rt_result');
+  if (!called) { resultDiv.innerHTML = '<span style="color:#a32d2d">Enter a called number.</span>'; return; }
+
+  const body = {mode: mode, called: called, calling: calling};
+  if (mode === 'trunk') {
+    const trunkId = document.getElementById('rt_trunk_id').value;
+    if (!trunkId) { resultDiv.innerHTML = '<span style="color:#a32d2d">Select a trunk.</span>'; return; }
+    body.trunk_id = trunkId;
+  } else {
+    const domainSel = document.getElementById('rt_domain_id');
+    const domainId = domainSel.value;
+    const username = document.getElementById('rt_username').value.trim();
+    if (!domainId || !username) { resultDiv.innerHTML = '<span style="color:#a32d2d">Select a domain and enter a username.</span>'; return; }
+    body.domain_id = domainId;
+    body.username = username;
+    body.sip_profile_id = domainSel.selectedOptions[0].dataset.sipProfileId;
+  }
+
+  resultDiv.innerHTML = 'Running test...';
+  try {
+    const res = await fetch('{{ url_for("web.node_route_test", node_id=node.id) }}', {
+      method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json'},
+      body: new URLSearchParams(body)
+    });
+    const data = await res.json();
+    resultDiv.innerHTML = renderRouteTestResult(data);
+  } catch (e) {
+    resultDiv.innerHTML = '<span style="color:#a32d2d">Request failed -- could not reach the Manager.</span>';
+  }
+}
+
+function renderRouteTestResult(data) {
+  if (data.error) {
+    return `<div style="padding:10px 14px;background:#fdecea;border-radius:4px;font-size:12px"><b style="color:#a32d2d">Could not run test</b><br>${data.detail || data.error}</div>`;
+  }
+  const rows = [];
+  if (data.result === 'rejected') {
+    rows.push(['Result', `<span class="badge badge-bad">Rejected: ${data.reject_code} ${data.reject_reason}</span>`]);
+    if (data.detail) rows.push(['Why', data.detail]);
+  } else if (data.result === 'no-routing-plan-assigned') {
+    rows.push(['Result', '<span class="badge badge-bad">No routing plan assigned to this trunk</span>']);
+    if (data.detail) rows.push(['Why', data.detail]);
+  } else {
+    rows.push(['Result', '<span class="badge badge-ok">Routed</span>']);
+    if (data.plan) rows.push(['Routing plan', `<span class="mono">${data.plan}</span>`]);
+    if (data.outcome === 'user') {
+      rows.push(['Destination', `<span class="mono">${data.destination_user}</span>`]);
+      rows.push(['Registered', data.registered === 'yes' ? '<span class="badge badge-ok">Yes</span>' : '<span class="badge badge-warn">No</span>']);
+      if (data.ring_policy) rows.push(['Ring policy', data.ring_policy]);
+    } else if (data.outcome === 'trunk') {
+      rows.push(['Routed to trunk', `<span class="mono">${data.routed_trunk}</span>`]);
+      rows.push(['Final called number', `<span class="mono">${data.final_called}</span>`]);
+      rows.push(['Final calling number', `<span class="mono">${data.final_calling}</span>`]);
+      if (data.media_mode_name) {
+        const modeBadge = data.media_mode_name === 'bypass'
+          ? `<span class="badge badge-warn">Bypass -- media NOT anchored through rtpengine</span>`
+          : `<span class="badge badge-ok">${data.media_mode_name}</span>`;
+        rows.push(['Effective media mode', modeBadge]);
+        rows.push(['Inbound media profile id', `<span class="mono">${data.media_inbound_profile_id || '(none resolved)'}</span>`]);
+        rows.push(['Outbound media profile id', `<span class="mono">${data.media_outbound_profile_id || '(none resolved)'}</span>`]);
+        rows.push(['Combination policy applied', data.media_combination_policy || '(n/a)']);
+      }
+    } else if (data.outcome === 'lcr') {
+      rows.push(['Selected gateway (LCR)', `<span class="mono">${data.selected_gateway}</span>`]);
+      rows.push(['Final called number', `<span class="mono">${data.final_called}</span>`]);
+    } else if (data.outcome === 'unconditional-forward') {
+      rows.push(['Forwarded to', `<span class="mono">${data.forward_target}</span>`]);
+      rows.push(['Forward mode', data.forward_mode]);
+    }
+    if (data.detail) rows.push(['Note', data.detail]);
+  }
+  return '<table style="max-width:600px">' + rows.map(([k, v]) => `<tr><td style="font-weight:500;padding:4px 12px 4px 0;white-space:nowrap">${k}</td><td style="padding:4px 0">${v}</td></tr>`).join('') + '</table>';
+}
+</script>
+{% endblock %}

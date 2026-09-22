@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">Manager Security</h1>
+
+<div class="card"><div class="card-head"><span class="card-title">Firewall rules</span></div>
+<table><thead><tr><th>Ports</th><th>Protocol</th><th>Source</th><th>Action</th><th></th></tr></thead>
+<tbody>{% for r in rules %}<tr>
+  <td class="mono">{{ r.port_start }}{% if r.port_end != r.port_start %}-{{ r.port_end }}{% endif %}</td>
+  <td>{{ r.protocol }}</td><td class="mono">{{ r.source_cidr }}</td>
+  <td><span class="badge badge-{{ 'ok' if r.action=='allow' else 'bad' }}">{{ r.action }}</span></td>
+  <td><a href="/settings/manager-security/rules/{{ r.id }}/delete" class="btn btn-sm">Delete</a></td>
+</tr>{% endfor %}</tbody></table>
+{% if not rules %}<div class="empty">No custom rules yet.</div>{% endif %}
+<form method="POST" action="/settings/manager-security/rules/add" style="padding:16px;display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+  <div class="fg" style="margin:0"><label class="fl">Port(s)</label><input name="port_start" type="number" style="width:80px" required></div>
+  <div class="fg" style="margin:0"><label class="fl">To (optional)</label><input name="port_end" type="number" style="width:80px"></div>
+  <div class="fg" style="margin:0"><label class="fl">Protocol</label><select name="protocol"><option>tcp</option><option>udp</option></select></div>
+  <div class="fg" style="margin:0"><label class="fl">Source CIDR</label><input name="source_cidr" value="0.0.0.0/0" style="width:140px"></div>
+  <div class="fg" style="margin:0"><label class="fl">Action</label><select name="action"><option value="allow">allow</option><option value="deny">deny</option></select></div>
+  <button type="submit" class="btn btn-sm">Add rule</button>
+</form>
+<form method="POST" action="/settings/manager-security/apply" style="padding:0 16px 16px">
+  <button type="submit" class="btn btn-primary" onclick="return confirm('Apply all enabled rules to this Manager now?')"><i class="ti ti-check"></i> Apply rules</button>
+</form>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title">Current INPUT chain (live)</span></div>
+<pre style="padding:16px;font-size:11px;overflow-x:auto;white-space:pre-wrap">{{ current }}</pre>
+</div>
+
+<div class="card"><div class="card-head"><span class="card-title" style="color:#a32d2d">Emergency lockdown</span></div>
+<div style="padding:16px">
+  <p style="font-size:12px;color:#888780;margin-bottom:12px">
+    Blocks everything except SSH and loopback immediately. This will cut off Postgres/HEP from every Node --
+    sync and stats push will fail on every node until restored.
+  </p>
+  {% if lockdown_active %}
+  <div class="badge badge-bad" style="margin-bottom:12px">LOCKDOWN CURRENTLY ACTIVE</div><br>
+  <form method="POST" action="/settings/manager-security/restore">
+    <button type="submit" class="btn btn-primary">Restore pre-lockdown rules</button>
+  </form>
+  {% else %}
+  <form method="POST" action="/settings/manager-security/lockdown" style="display:flex;gap:8px;align-items:end">
+    <div class="fg" style="margin:0"><label class="fl">Type "lockdown" to confirm</label><input name="confirm" style="width:160px"></div>
+    <button type="submit" class="btn" style="background:#a32d2d;color:#fff">Emergency lockdown</button>
+  </form>
+  {% endif %}
+</div></div>
+{% endblock %}

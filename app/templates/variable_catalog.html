@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">Variable Catalog</h1>
+<p style="font-size:12px;color:#888780;margin:-8px 0 16px">
+  Every <code>${placeholder}</code> usable in header templates (Trunks/Domains -> Custom headers to add). This is a reference list, not a configurable
+  setting: each source below is an individually hardcoded, verified reference inside kamailio.cfg.template's own script logic -- Kamailio has no mechanism
+  to evaluate an arbitrary expression from a database-sourced string, so unlike the <a href="/settings/modparam-catalog">Modparam Catalog</a>, there's no
+  per-node override for these.
+</p>
+
+{% for category, vars in categories.items() %}
+<div class="card"><div class="card-head"><span class="card-title">{{ category }}</span></div>
+<table><thead><tr><th>Placeholder</th><th>Kamailio source</th><th>Description</th></tr></thead>
+<tbody>{% for v in vars %}<tr>
+  <td class="mono">${{ '{' }}{{ v.placeholder_name }}{{ '}' }}</td>
+  <td class="mono">{{ v.kamailio_source }}</td>
+  <td style="font-size:12px;color:#555">{{ v.description }}</td>
+</tr>{% endfor %}</tbody></table>
+</div>
+{% endfor %}
+{% endblock %}

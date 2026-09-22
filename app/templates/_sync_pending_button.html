@@ -1,0 +1,20 @@
+{# Fixes a real layout bug: .card-head uses justify-content:space-
+   between, and with THREE flex children (title, sync-pending button,
+   Add button) that distributes equal gaps between all three, pushing
+   sync-pending to look centered between title and Add instead of
+   sitting directly beside Add as intended. Wrapping sync-pending +
+   Add in their own flex sub-container means .card-head only ever
+   sees two top-level items (title, button-group) -- and centralizing
+   it here means the three card-heads that need this (Trunks, Groups,
+   Routing) can't drift out of sync with each other again.
+
+   Usage:
+     {% from "_sync_pending_button.html" import sync_pending_group %}
+     {{ sync_pending_group(node.id, routing_sync_pending, "/nodes/" ~ node.id ~ "/trunks/new", "Add trunk") }}
+#}
+{% macro sync_pending_group(node_id, pending, add_url, add_label) %}
+<div style="display:flex;gap:8px;align-items:center">
+  {% if pending %}<a href="/nodes/{{ node_id }}/sync?return_url={{ request.path|urlencode }}" class="btn btn-sm" style="background:#e0c060;color:#1a1a1a"><i class="ti ti-refresh"></i> Sync</a>{% endif %}
+  <a href="{{ add_url }}" class="btn btn-sm"><i class="ti ti-plus"></i> {{ add_label }}</a>
+</div>
+{% endmacro %}

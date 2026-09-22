@@ -1,0 +1,14 @@
+{% for c in live_calls %}
+<tr>
+  <td>{% if c.source_name %}<span class="badge badge-info">{{ c.source_type }}</span> <span class="mono">{{ c.source_name }}</span>{% else %}<span style="color:#888780">--</span>{% endif %}</td>
+  <td>{% if c.destination_name %}<span class="badge badge-info">{{ c.destination_type }}</span> <span class="mono">{{ c.destination_name }}</span>{% else %}<span style="color:#888780">--</span>{% endif %}</td>
+  <td class="mono">{{ c.variables.original_called or '-' }}</td>
+  <td class="mono">{{ c.variables.original_calling or '-' }}</td>
+  <td class="mono">{{ c.effective_called_number or '-' }}</td>
+  <td class="mono">{{ c.effective_calling_number or '-' }}</td>
+  <td class="mono" style="font-size:11px">{{ c.call_id }}</td>
+  <td>{{ c.duration }}s</td>
+  <td class="mono">{{ c.negotiated_codec or '-' }}</td>
+  <td><button type="button" class="btn btn-sm" onclick='showCallDetail({{ c|tojson }})'>Detail</button></td>
+</tr>
+{% endfor %}

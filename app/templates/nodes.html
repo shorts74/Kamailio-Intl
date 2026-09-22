@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+  <h1 style="font-size:18px;font-weight:500;margin:0">Nodes</h1>
+  <a href="/nodes/new" class="btn btn-primary"><i class="ti ti-plus"></i> Add node</a>
+</div>
+
+<div data-live-region="q">
+{% call toolbar(page=page, total_pages=total_pages, total=total, refresh_url="/nodes") %}
+  <div class="fg" style="margin:0"><label class="fl">Search name</label><input name="q" value="{{ q }}" placeholder="node name..." data-live-search data-page-param="page"></div>
+  <div class="fg" style="margin:0"><label class="fl">Region</label><select name="region">
+    <option value="">All regions</option>{% for r in regions %}<option value="{{ r.region }}" {{ 'selected' if region_filter==r.region }}>{{ r.region }}</option>{% endfor %}
+  </select></div>
+  {% if q or region_filter %}<a href="/nodes" class="btn btn-sm">Clear</a>{% endif %}
+{% endcall %}
+
+<div class="card">
+  {% if nodes %}
+  <table><thead><tr><th>Name</th><th>Region</th><th>Status</th><th>Profiles</th><th>Trunks</th><th>Registered (in/out)</th><th>Calls (today/hr/min)</th><th>Last Sync</th><th>Alerts</th><th></th><th></th></tr></thead>
+  <tbody>{% for n in nodes %}<tr>
+    <td><a href="/nodes/{{ n.id }}"><b>{{ n.name }}</b></a></td><td><span class="badge badge-info">{{ n.region }}</span></td>
+    <td>{% if n.enabled %}<span class="badge badge-ok">Enabled</span>{% else %}<span class="badge badge-bad">Disabled</span>{% endif %}</td>
+    <td>{{ n.profile_count }}</td>
+    <td><span class="badge badge-{{ 'ok' if n.stats.trunk_down == 0 else 'warn' }}">{{ n.stats.trunk_up }}/{{ n.stats.trunk_down }}/{{ n.stats.trunk_total }}</span></td>
+    <td>{{ n.stats.registered_in }} / {{ n.stats.registered_out }}</td>
+    <td>{{ n.stats.calls_today }} / {{ n.stats.calls_hour }} / {{ n.stats.calls_min }}
+      {% if n.stats.comprehensive.calls_hour %}<div style="font-size:11px;color:#888780">{{ n.stats.comprehensive.answered_hour }} answered{% if n.stats.comprehensive.failed_hour %}, <span style="color:#c62828">{{ n.stats.comprehensive.failed_hour }} failed</span>{% endif %}{% if n.stats.comprehensive.avg_mos_hour %}, MOS {{ '%.2f'|format(n.stats.comprehensive.avg_mos_hour) }}{% endif %}</div>{% endif %}
+    </td>
+    <td title="{{ n.last_routing_sync_at or 'never synced' }}">{{ n.last_routing_sync_at|time_ago }}{% if n.sync_pending %}<div><span class="badge badge-warn" style="font-size:9px">Pending</span></div>{% endif %}</td>
+    <td>{% if n.stats.active_alerts > 0 %}<span class="badge badge-bad">{{ n.stats.active_alerts }}</span>{% else %}-{% endif %}</td>
+    <td><a href="/nodes/{{ n.id }}/troubleshoot?run_checks=1" class="btn btn-sm" style="padding:2px 6px" title="Troubleshoot node"><i class="ti ti-stethoscope"></i></a></td>
+    <td><a href="/nodes/{{ n.id }}" class="btn btn-sm">Manage</a></td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty">No nodes match. <a href="/nodes/new">Add your first node</a>.</div>{% endif %}
+</div>
+</div>
+{% endblock %}

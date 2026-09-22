@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">Add node</h1>
+<div class="card"><div style="padding:16px;font-size:12px;color:#888780">
+  A Default SIP Profile (UDP+TCP on the private IP, plus a localhost TCP listener) is created automatically.
+  You can add more SIP Profiles from the node's page afterward.
+</div></div>
+<form method="POST">
+<div class="card"><div style="padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+  <div class="fg"><label class="fl">Name</label><input name="name" value="{{ node.name or '' if node else '' }}" required></div>
+  <div class="fg"><label class="fl">FQDN</label><input name="fqdn" value="{{ node.fqdn or '' if node else '' }}" required></div>
+  <div class="fg"><label class="fl">Region</label><input name="region" value="{{ node.region or 'default' if node else 'default' }}"></div>
+  <div class="fg"><label class="fl">Private IP</label><input name="private_ip" value="{{ node.private_ip or '' if node else '' }}" required></div>
+  <div class="fg"><label class="fl">Public IP (optional)</label><input name="public_ip" value="{{ node.public_ip or '' if node else '' }}"></div>
+  <div class="fg"><label class="fl">SSH host</label><input name="ssh_host" placeholder="root@1.2.3.4" value="{{ node.ssh_host or '' if node else '' }}" required></div>
+  <div class="fg"><label class="fl">SSH key path</label><input name="ssh_key_path" value="{{ node.ssh_key_path or '/root/.ssh/node_automation' if node else '/root/.ssh/node_automation' }}"></div>
+</div></div>
+<button type="submit" class="btn btn-primary"><i class="ti ti-check"></i> Create node</button>
+<a href="/nodes" class="btn">Cancel</a>
+</form>
+{% endblock %}

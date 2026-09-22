@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% from "_toolbar.html" import toolbar %}
+{% block content %}
+<h1 style="font-size:18px;font-weight:500;margin:0 0 16px">Audit Log</h1>
+
+{% set show_node = true %}
+{% include "_audit_table.html" with context %}
+{% endblock %}

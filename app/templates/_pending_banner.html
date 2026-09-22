@@ -1,0 +1,19 @@
+{% if pending %}
+<div class="card" style="border:1.5px solid #a32d2d;background:#fcebeb">
+  <div class="card-head" style="border-bottom-color:#f0c5c5"><span class="card-title" style="color:#a32d2d;font-weight:600"><i class="ti ti-alert-triangle"></i> Apply & Restart required NOW ({{ pending|length }} pending change{{ 's' if pending|length != 1 }})</span></div>
+  <div style="padding:16px">
+    {% if 'advertise_ip' in pending|join(' ') %}
+    <p style="font-size:13px;color:#a32d2d;font-weight:600;margin:0 0 10px">One of these changes updates a SIP Profile's advertise IP -- calls will use the stale address until you apply this now.</p>
+    {% endif %}
+    <ul style="margin:0 0 12px 18px;font-size:13px">{% for p in pending %}<li>{{ p }}</li>{% endfor %}</ul>
+    <form method="POST" action="/nodes/{{ node.id }}/apply" style="display:inline">
+      <input type="hidden" name="return_url" value="{{ request.path }}">
+      <button type="submit" class="btn" style="background:#a32d2d;color:#fff;border-color:#a32d2d" onclick="return confirm('This restarts Kamailio on {{ node.name }} and will drop active calls. Continue?')"><i class="ti ti-refresh"></i> Apply & Restart</button>
+    </form>
+    <form method="POST" action="/nodes/{{ node.id }}/discard" style="display:inline">
+      <input type="hidden" name="return_url" value="{{ request.path }}">
+      <button type="submit" class="btn" onclick="return confirm('Discard all pending SIP Profile/modparam changes?')">Discard changes</button>
+    </form>
+  </div>
+</div>
+{% endif %}
