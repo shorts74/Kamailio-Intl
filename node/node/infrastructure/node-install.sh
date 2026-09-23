@@ -75,7 +75,18 @@ run_step() {
 
 # ── Step functions ──────────────────────────────────────────
 step_system_prep() {
-  apt-get update && apt-get upgrade -y
+  apt-get update
+  # Debian 13 / cloud-image safety: do not let a routine upgrade swap the
+  # running kernel mid-install. On cloud VMs (e.g. AWS EC2) that creates a
+  # pending-reboot mismatch -- the running kernel gets superseded and its
+  # headers rotate out of the mirror -- and rebooting into an unvalidated
+  # kernel can strand the instance. Hold installed kernel/header packages
+  # across this upgrade; upgrade the kernel deliberately later (with a
+  # snapshot) if desired.
+  _held_kpkgs="$(dpkg-query -W -f='${Package}\n' 'linux-image-*' 'linux-headers-*' 2>/dev/null | grep -vE 'dbg' || true)"
+  [ -n "$_held_kpkgs" ] && apt-mark hold $_held_kpkgs >/dev/null 2>&1 || true
+  apt-get upgrade -y
+  [ -n "$_held_kpkgs" ] && apt-mark unhold $_held_kpkgs >/dev/null 2>&1 || true
   hostnamectl set-hostname "$NODE_NAME"
   echo "$NODE_NAME" > /etc/hostname
   grep -q "$NODE_IP" /etc/hosts || echo "$NODE_IP  $NODE_NAME $NODE_FQDN" >> /etc/hosts
@@ -204,9 +215,20 @@ wait_for_apt_lock() {
 }
 
 step_kernel_headers() {
+  # Userspace RTP forwarding (the default) needs no kernel module and no
+  # kernel headers -- skip entirely. Only attempt headers when in-kernel
+  # forwarding is explicitly requested, and never fail the install over it.
+  if [ "${RTPENGINE_INKERNEL:-no}" != "yes" ]; then
+    info "RTPENGINE_INKERNEL is not 'yes' -- using userspace RTP forwarding; skipping kernel headers (no kernel module, no reboot needed)."
+    return 0
+  fi
   wait_for_apt_lock
-  apt-get install -y linux-headers-$(uname -r)
-  [ -d "/usr/src/linux-headers-$(uname -r)" ] || error "Kernel headers not found after install"
+  if ! apt-get install -y "linux-headers-$(uname -r)"; then
+    warn "Kernel headers for the running kernel ($(uname -r)) are not available in the configured apt repos -- common on cloud images whose running kernel has been superseded (its header package has rotated out of the mirror). Falling back to userspace forwarding. To use in-kernel forwarding, install matching headers manually (e.g. from snapshot.debian.org) and re-run with RTPENGINE_INKERNEL=yes."
+    RTPENGINE_INKERNEL="no"
+    return 0
+  fi
+  [ -d "/usr/src/linux-headers-$(uname -r)" ] || { warn "Kernel headers package installed but source dir missing -- falling back to userspace forwarding"; RTPENGINE_INKERNEL="no"; }
 }
 
 step_rtpengine_deps() {
@@ -216,7 +238,7 @@ step_rtpengine_deps() {
     libpcap-dev libjson-glib-dev libxtables-dev liburing-dev libiptc-dev \
     libevent-dev libspandsp-dev libxmlrpc-core-c3-dev \
     libavcodec-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev \
-    libbcg729-dev libzstd-dev markdown libwebsockets-dev libncurses-dev libncursesw5-dev \
+    libbcg729-dev libzstd-dev markdown libwebsockets-dev libncurses-dev \
     libopus-dev libjwt-dev libmosquitto-dev libsystemd-dev libmariadb-dev default-libmysqlclient-dev
 }
 
@@ -234,10 +256,21 @@ step_rtpengine_build() {
   git clone --depth 1 https://github.com/sipwise/rtpengine.git
   cd rtpengine
   make -C daemon
-  make -C kernel-module || warn "Kernel module build failed -- falling back to userspace forwarding"
-  [ -f /opt/rtpengine/daemon/rtpengine ] || error "RTPEngine build failed"
+  [ -f /opt/rtpengine/daemon/rtpengine ] || error "RTPEngine daemon build failed"
   install -m 755 /opt/rtpengine/daemon/rtpengine /usr/local/bin/rtpengine
 
+  # Userspace forwarding is the default and needs only the daemon built
+  # above. The kernel module is an optional throughput optimization -- build
+  # and load it only when explicitly opted in (RTPENGINE_INKERNEL=yes), and
+  # degrade to userspace on any failure (never fatal). This deliberately
+  # avoids the kernel-headers/reboot coupling that is fragile on cloud VMs.
+  if [ "${RTPENGINE_INKERNEL:-no}" != "yes" ]; then
+    info "Userspace RTP forwarding selected (default) -- skipping kernel module build/load."
+    return 0
+  fi
+
+  info "In-kernel RTP forwarding requested -- building rtpengine kernel module (best-effort)."
+  make -C kernel-module || warn "Kernel module build failed -- falling back to userspace forwarding"
   local kver; kver=$(uname -r)
   if [ -f /opt/rtpengine/kernel-module/nft_rtpengine.ko ]; then
     mkdir -p /lib/modules/${kver}/extra
@@ -245,6 +278,8 @@ step_rtpengine_build() {
     depmod -a
     modprobe nft_rtpengine 2>/dev/null && echo "nft_rtpengine" > /etc/modules-load.d/rtpengine.conf || \
       warn "Kernel module built but failed to load -- userspace forwarding will be used"
+  else
+    warn "Kernel module artifact not produced -- userspace forwarding will be used"
   fi
 }
 
@@ -409,7 +444,12 @@ EOF
 
 step_kamailio_install() {
   curl -fsSL https://deb.kamailio.org/kamailiodebkey.gpg | gpg --dearmor -o /usr/share/keyrings/kamailio-archive-keyring.gpg
-  echo "deb [signed-by=/usr/share/keyrings/kamailio-archive-keyring.gpg] https://deb.kamailio.org/kamailio60 bookworm main" \
+  # Use the running distro's codename so the correct Kamailio suite is used
+  # (Debian 12 -> bookworm, Debian 13 -> trixie). Hardcoding bookworm pulls
+  # packages built for the wrong release and breaks the Kamailio install on
+  # Debian 13.
+  KAMAILIO_REPO_CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-bookworm}")"
+  echo "deb [signed-by=/usr/share/keyrings/kamailio-archive-keyring.gpg] https://deb.kamailio.org/kamailio60 ${KAMAILIO_REPO_CODENAME} main" \
     > /etc/apt/sources.list.d/kamailio.list
   wait_for_apt_lock
   apt-get update
