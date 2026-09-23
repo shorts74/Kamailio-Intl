@@ -17,3 +17,4 @@ infrastructure/manager.conf
 # Python generated files
 __pycache__/
 *.pyc
+node/node.conf

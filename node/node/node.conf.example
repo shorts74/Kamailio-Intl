@@ -1,0 +1,75 @@
+# ============================================================
+# node.conf -- site-specific configuration for THIS Kamailio Node
+#
+# Copy this file to node.conf and fill in your values. Keep
+# node.conf out of version control / separate from the install
+# script itself -- when you update node-install.sh to a newer
+# version of this bundle, your node.conf survives untouched since
+# the install script sources it rather than embedding these values.
+#
+# IMPORTANT -- how re-running this script actually behaves:
+#
+# node-install.sh is checkpointed/resumable. Completed steps are
+# tracked as marker files in /var/lib/kamailio-install/, COMPLETELY
+# SEPARATE from this config file and the script itself. This means:
+#
+#   - Uploading a newer node-install.sh and running it again will
+#     SKIP every step that already succeeded before -- intentional,
+#     so you can resume cleanly after fixing an unrelated failure
+#     without redoing the lengthy RTPEngine build from scratch. It
+#     also means bug fixes in already-completed steps won't take
+#     effect on a plain re-run.
+#
+#   - To force EVERY step to re-run:
+#       FORCE_REINSTALL_ALL=yes ./node-install.sh
+#
+#   - To clear all checkpoints and start fresh (the local SQLite
+#     routing cache gets explicitly removed and rebuilt -- low risk,
+#     it's never authoritative data, just regenerated from the
+#     Manager on the next sync cycle either way):
+#       rm -rf /var/lib/kamailio-install
+#       ./node-install.sh
+#
+#   - Regardless of the above, every run always ends with an "ensure
+#     all services are actually running" pass that's independent of
+#     checkpoints entirely -- so even a run where everything gets
+#     skipped will still correctly (re)start any stopped service.
+# ============================================================
+
+NODE_NAME="sip-us-east-1"          # unique across ALL nodes
+NODE_REGION="us-east"
+NODE_FQDN="sip-us-east-1.example.com"
+NODE_IP="__SET_ME__"              # THIS server's PRIVATE IP (always private -- see docs/MULTI-REGION.md)
+EIP="__SET_ME__"                   # THIS server's public/Elastic IP
+
+MANAGER_IP="__SET_ME__"              # Kamailio Manager's IP or FQDN (public if cross-region, see docs)
+MANAGER_FQDN="__SET_ME__"
+KAMAILIO_DB_PASS="__SET_ME__"      # must match the Manager's KAMAILIO_DB_PASS
+
+MANAGER_SSH_PUBKEY="__SET_ME__"      # paste from the Manager's setup output
+
+# ── Optional features ───────────────────────────────────────
+ENABLE_FAIL2BAN="yes"              # yes | no
+ENABLE_SNMP="no"                   # yes | no -- if yes, set values below
+SKIP_SSH_HARDENING="no"            # yes to skip disabling password auth
+                                    # (auto-skipped anyway if no SSH key is
+                                    # present, to avoid any lockout risk)
+
+# RTP port range -- also determines which UDP ports the baseline
+# firewall opens. Narrower ranges = smaller attack surface, but must
+# be wide enough for your expected peak concurrent call count
+# (roughly 2 ports per call).
+RTP_PORT_MIN="10000"
+RTP_PORT_MAX="30000"
+SNMP_VERSION="v3"                  # v2c | v3 (v3 strongly recommended if reachable externally)
+SNMP_V2C_COMMUNITY="__SET_ME__"    # only used if SNMP_VERSION=v2c
+SNMP_V3_USER="__SET_ME__"          # only used if SNMP_VERSION=v3
+SNMP_V3_AUTH_PASS="__SET_ME__"
+SNMP_V3_PRIV_PASS="__SET_ME__"
+
+# DNS resolvers used for FQDN-based trunk trust matching and general
+# outbound resolution -- baked in by default rather than relying on
+# the cloud provider's VPC resolver, which can be unreliable for
+# public hostnames (see docs/ROUTING-ENGINE.md "DNS lesson learned")
+PUBLIC_DNS_1="8.8.8.8"
+PUBLIC_DNS_2="1.1.1.1"

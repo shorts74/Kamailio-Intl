@@ -1,0 +1,2480 @@
+#!/usr/bin/env python3
+"""
+Sync routing tables: PostgreSQL (Kamailio Manager) -> local SQLite
+cache (this Kamailio Node).
+
+v3: Routing Profiles, Gateway Groups, and Trunks are ALL node-scoped
+now -- there is no more "global" trunk/group/profile concept (v2 had
+node_id IS NULL meaning "synced to every node"; that's gone). This
+node only ever pulls the rows whose node_id matches its own. DIDs and
+routing rules are scoped transitively via routing_profile_id, which
+is itself node-scoped.
+
+Also syncs Domains: only domains actually enabled on one of this
+node's SIP Profiles get synced down (same "sync only what's
+referenced" principle already used for rate tables), and only LOCAL
+domains have real subscriber credentials -- PROXY domains have no
+subscribers at all; their calls route via a primary/secondary trunk
+pair instead (see platform_domains.domain_type), not a REGISTER-relay
+mechanism.
+
+Supports incremental application via --incremental (reads
+platform_sync_log since this node's last watermark; falls back to a
+full rebuild automatically if the watermark is missing or stale).
+
+KNOWN GAP, being closed: the local sip_profile_domains, sip_listeners,
+domain_reject_info, and node_fallback_reject tables are synced by this
+script; the kamailio.cfg REGISTER route that uses them (checking
+which SIP Profile received a REGISTER via $Ri:$Rp, rejecting with the
+right code/reason if the target domain isn't enabled there) is being
+added -- see route[REGISTER] in kamailio.cfg.template.
+"""
+import sys
+import os
+import re
+import fcntl
+import shutil
+import subprocess
+import hashlib
+import ipaddress
+import logging
+import sqlite3
+import base64
+import time
+import socket
+try:
+    import dns.resolver
+    import dns.exception
+    DNSPYTHON_AVAILABLE = True
+except ImportError:
+    # dnspython is only needed for SRV-record resolution, itself only
+    # used by trunks with trust_dns_resolved_ip explicitly enabled -- a
+    # relatively rare, opt-in case. A missing dnspython install must
+    # never crash the entire sync script (every other sync function --
+    # trunk identity, ACLs, routing profiles, subscriber_auth, etc --
+    # has nothing to do with DNS at all). resolve_trunk_ips() below
+    # degrades gracefully to plain A-record resolution via socket.
+    # gethostbyname_ex() when this flag is False, the same fallback
+    # path it already takes when a hostname simply has no SRV records.
+    DNSPYTHON_AVAILABLE = False
+    print("WARN: dnspython not installed -- SRV-record resolution for "
+          "trust_dns_resolved_ip trunks will fall back to plain A-record "
+          "resolution only. Run 'pip3 install dnspython --break-system-packages' "
+          "on this node to restore full SRV support.", file=sys.stderr)
+import psycopg2
+import psycopg2.extras
+
+PG_HOST = '__MANAGER_IP__'
+PG_PORT = 5432
+PG_DB   = 'kamailio'
+PG_USER = 'kamailio'
+PG_PASS = '__KAMAILIO_DB_PASS__'
+THIS_NODE_IP = '__NODE_IP__'
+# Self-hash version fingerprint -- read and hash this script's own
+# file contents at startup, so every sync log line can report exactly
+# which version actually ran, with zero manual version-bumping
+# discipline required (unlike a hardcoded version string, this can
+# never drift out of sync with the code it's describing). Falls back
+# to "unknown" rather than crashing if __file__ is unavailable or
+# unreadable for any reason -- this is a diagnostic nicety, not
+# something that should ever block a sync from running.
+try:
+    with open(__file__, 'rb') as _f:
+        SCRIPT_VERSION = hashlib.sha256(_f.read()).hexdigest()[:12]
+except Exception:
+    SCRIPT_VERSION = 'unknown'
+
+SQLITE_PATH = '/etc/kamailio/dbsqlite/kamailio.db'
+LOG_FILE = '/var/log/kamailio/sync-routing.log'
+WATERMARK_FILE = '/var/lib/kamailio/last_sync_id.txt'
+LOCK_FILE = '/var/lib/kamailio/sync-routing.lock'
+# Absolute path, not a bare "kamcmd" -- cron's default PATH (often just
+# /usr/bin:/bin) typically excludes /usr/sbin, where kamcmd actually
+# lives on a real Kamailio install. Confirmed as the real cause of
+# "[Errno 2] No such file or directory: 'kamcmd'" warnings seen live:
+# this script worked fine run manually (a login shell's fuller PATH),
+# failed identically every time under cron.
+KAMCMD_PATH = '/usr/sbin/kamcmd'
+WATERMARK_STALE_SECONDS = 300  # if incremental watermark is older than this, do a full rebuild instead
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)-8s %(message)s',
+    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler(sys.stdout)]
+)
+log = logging.getLogger('sync-routing')
+
+
+def ha1(username, realm, password):
+    return hashlib.md5(f"{username}:{realm}:{password}".encode()).hexdigest()
+
+
+def encode_arithmetic_profile(rules_for_profile, conditions_by_rule_id):
+    """
+    Encodes a routing profile's arithmetic rule chain into the
+    finalized DESIGN.md format:
+        condition:  field:operator:value:chain_operator
+        rule:       match_mode|condition,condition,...|destination_type:dest_fields...
+        full value: rule1;rule2;rule3...
+    rules_for_profile: list of platform_routing_arithmetic_rules rows
+    for ONE profile, already ordered by order_index. conditions_by_rule_id:
+    dict of rule_id -> ordered list of condition rows.
+    """
+    rule_strs = []
+    for rule in rules_for_profile:
+        conditions = conditions_by_rule_id.get(rule['id'], [])
+        cond_strs = []
+        for c in conditions:
+            chain_op = c.get('chain_operator') or ''
+            cond_strs.append(f"{c['field']}:{c['operator']}:{c['value']}:{chain_op}")
+        conditions_encoded = ",".join(cond_strs)
+
+        dest_parts = [rule.get('destination_type') or '']
+        for field in ('dest_trunk_setid', 'dest_failover_setid', 'dest_username', 'dest_domain', 'dest_jump_profile_id'):
+            v = rule.get(field)
+            dest_parts.append(str(v) if v is not None else '')
+        dest_encoded = ":".join(dest_parts)
+
+        rule_strs.append(f"{rule['match_mode']}|{conditions_encoded}|{dest_encoded}")
+    return ";".join(rule_strs)
+
+
+def encode_bridge_segment(p):
+    """
+    Sparse encoding of a Bridge (engine_type='bridge') routing
+    profile's destination + number-manipulation/normalization config,
+    per the finalized DESIGN.md field shapes. Only fields actually SET
+    on the profile are emitted -- a simple Bridge profile using only a
+    handful of fields stays small in the resulting subscriber_auth
+    value, never pays for the full ~20+ field worst case, consistent
+    with the sparse-storage principle applied everywhere else in this
+    identity table. Returns an empty string if nothing is set at all
+    (a Bridge profile with no config -- degenerate but not invalid).
+    Short key names deliberately used (dt/tr/fo/... rather than full
+    field names) since this whole segment is itself already appended
+    to an otherwise-compact value.
+    """
+    field_map = [
+        ("dt", "destination_type"), ("tr", "dest_trunk_setid"), ("fo", "dest_failover_setid"),
+        ("du", "dest_username"), ("dd", "dest_domain"), ("dj", "dest_jump_profile_id"),
+        ("tc", "bridge_trace_enabled"), ("rc", "bridge_record_enabled"), ("mp", "bridge_media_profile_id"),
+        ("cdf", "bridge_forced_called_number"), ("cgf", "bridge_forced_calling_number"),
+        ("cdpr", "bridge_called_pre_normalize"), ("cds", "bridge_called_strip_digits"),
+        ("cdsl", "bridge_called_strip_last_digits"), ("cdrl", "bridge_called_retain_last_digits"),
+        ("cdp", "bridge_called_prepend_digits"), ("cdx", "bridge_called_append_suffix"),
+        ("cdpo", "bridge_called_post_normalize"),
+        ("cgpr", "bridge_calling_pre_normalize"), ("cgs", "bridge_calling_strip_digits"),
+        ("cgsl", "bridge_calling_strip_last_digits"), ("cgrl", "bridge_calling_retain_last_digits"),
+        ("cgp", "bridge_calling_prepend_digits"), ("cgx", "bridge_calling_append_suffix"),
+        ("cgpo", "bridge_calling_post_normalize"),
+        ("cdcc", "bridge_called_home_country_code"), ("cdac", "bridge_called_home_area_code"),
+        ("cdtp", "bridge_called_national_trunk_prefix"), ("cdip", "bridge_called_international_prefix"),
+        ("cdfmt", "bridge_called_target_format"), ("cdpl", "bridge_called_plus_mode"),
+        ("cgcc", "bridge_calling_home_country_code"), ("cgac", "bridge_calling_home_area_code"),
+        ("cgtp", "bridge_calling_national_trunk_prefix"), ("cgip", "bridge_calling_international_prefix"),
+        ("cgfmt", "bridge_calling_target_format"), ("cgpl", "bridge_calling_plus_mode"),
+    ]
+    parts = []
+    for short_key, field_name in field_map:
+        value = p.get(field_name)
+        if value is None or value == "" or value is False:
+            continue  # sparse -- omit entirely, not stored as empty/zero
+        if value is True:
+            value = "1"
+        parts.append(f"{short_key}={value}")
+    return ",".join(parts)
+
+
+def fetch_all(pcur, sql, params=None):
+    pcur.execute(sql, params or ())
+    return pcur.fetchall()
+
+
+def expand_acl_cidr_to_ips(cidr, max_addresses=256):
+    """
+    Expands an ACL CIDR entry into a list of individual /32 IP
+    strings. This platform's ACL editor caps new entries at /28 (16
+    addresses) via validate_cidr's max_addresses, but that's re-
+    checked here defensively rather than trusted blindly (e.g. data
+    saved before that cap existed) -- max_addresses here is a much
+    looser backstop (256), not the UI's own /28 policy.
+
+    Returns None (not an empty list) if the CIDR is unparseable or
+    too wide to expand -- lets callers distinguish "skip, needs
+    attention" from "genuinely produced zero addresses", which an
+    empty list can't do on its own.
+    """
+    try:
+        network = ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return None
+    if network.num_addresses > max_addresses:
+        return None
+    if network.num_addresses <= 2:
+        return [str(network.network_address)]
+    # A /28-or-narrower ACL entry is a trust boundary, not a real
+    # subnet with meaningful network/broadcast semantics -- hosts()
+    # alone would silently exclude the first/last address of the
+    # range, which a real client could still legitimately use.
+    ips = [str(h) for h in network.hosts()]
+    ips.append(str(network.network_address))
+    ips.append(str(network.broadcast_address))
+    return ips
+
+
+def get_node_info(pcur):
+    rows = fetch_all(pcur, "SELECT id, region, force_sync_requested_at FROM platform_nodes WHERE private_ip = %s", (THIS_NODE_IP,))
+    if not rows:
+        return -1, 'unregistered', None
+    return rows[0]['id'], rows[0]['region'], rows[0]['force_sync_requested_at']
+
+
+def resolve_dest_setid(dest_trunk_id, dest_gateway_group_id, trunk_setid_by_id, group_setid_by_id):
+    """A rule/DID can target either a specific trunk OR a gateway group."""
+    if dest_trunk_id:
+        return trunk_setid_by_id.get(dest_trunk_id)
+    if dest_gateway_group_id:
+        return group_setid_by_id.get(dest_gateway_group_id)
+    return None
+
+
+def resolve_rule_media_profile(rule_override_id, dest_trunk_id, dest_gateway_group_id,
+                                trunk_resolved_media_profile_by_id, group_by_id):
+    """Outbound-leg media profile for a routing rule: the rule's own
+    override, else the destination trunk's already-resolved value, else
+    (for a gateway-group destination, which has no SIP Profile of its
+    own to fall back through) that group's own override if set.
+    0 = nothing resolved anywhere in the chain -- kamailio.cfg treats
+    that as a safe hardcoded Transparent fallback rather than an
+    arbitrary member trunk's setting winning non-deterministically.
+    """
+    if rule_override_id:
+        return rule_override_id
+    if dest_trunk_id:
+        return trunk_resolved_media_profile_by_id.get(dest_trunk_id) or 0
+    if dest_gateway_group_id:
+        return (group_by_id.get(dest_gateway_group_id) or {}).get('media_profile_id') or 0
+    return 0
+
+
+def resolve_dest_user(dest_subscriber_id, subscriber_by_id, domain_name_by_id):
+    """A rule/DID can also target a specific registered subscriber
+    instead of a trunk/group -- resolved to (username, domain_name)
+    for kamailio.cfg to lookup("location") against at match time."""
+    if not dest_subscriber_id:
+        return None, None
+    sub = subscriber_by_id.get(dest_subscriber_id)
+    if not sub:
+        return None, None
+    domain_name = domain_name_by_id.get(sub['domain_id'])
+    if not domain_name:
+        return None, None
+    return sub['username'], domain_name
+
+
+def resolve_trunk_ips(ip_addr):
+    """
+    Returns every current numeric IP for a trunk's ip_addr field --
+    itself unchanged (as a single-item list) if it's already a
+    literal IP, or every IP reachable via DNS if it's a hostname.
+    is_in_subnet() (used at runtime for trunk identity matching)
+    cannot match a source IP against a DNS name at all, so a hostname-
+    valued ip_addr inserted into trunk_identity_candidates verbatim
+    (the previous behavior here) could never actually match anything.
+
+    Follows the standard SIP/RFC-3263-style resolution order: SIP SRV
+    records first (_sip._udp, _sip._tcp, _sips._tcp -- tried for all
+    three, since a hostname could publish any combination and a single
+    trunk's traffic could arrive from any of them), each SRV target
+    resolved to its own A-records; plain A-record resolution of the
+    hostname directly only as a fallback when no SRV records exist at
+    all. A hostname commonly resolves to multiple IPs -- round-robin A
+    records, or several SRV targets each with their own IP -- and all
+    of them are valid candidates, not just whichever one a single
+    lookup happens to return first.
+    """
+    if not ip_addr:
+        return []
+    try:
+        ipaddress.ip_address(ip_addr)
+        return [ip_addr]
+    except ValueError:
+        pass
+
+    ips = []
+    srv_found = False
+    if DNSPYTHON_AVAILABLE:
+        for service in ("_sip._udp", "_sip._tcp", "_sips._tcp"):
+            try:
+                srv_answer = dns.resolver.resolve(f"{service}.{ip_addr}", "SRV")
+            except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+                continue
+            except (dns.exception.Timeout, dns.resolver.NoNameservers) as e:
+                print(f"WARN: SRV lookup for {service}.{ip_addr} failed (transient): {e}", file=sys.stderr)
+                continue
+            srv_found = True
+            for rec in srv_answer:
+                target = str(rec.target).rstrip(".")
+                try:
+                    a_answer = dns.resolver.resolve(target, "A")
+                    ips.extend(str(r) for r in a_answer)
+                except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer,
+                        dns.exception.Timeout, dns.resolver.NoNameservers) as e:
+                    print(f"WARN: could not resolve SRV target {target!r} (from {service}.{ip_addr}) "
+                          f"to an A record: {e}", file=sys.stderr)
+
+    if not srv_found:
+        try:
+            _, _, addrs = socket.gethostbyname_ex(ip_addr)
+            ips.extend(addrs)
+        except (socket.gaierror, socket.herror) as e:
+            print(f"WARN: could not resolve trunk ip_addr {ip_addr!r} to any IP (no SRV records "
+                  f"either): {e} -- this trunk's primary-IP identity candidate will be skipped "
+                  f"this sync cycle (its ACL entries, if any, are unaffected)", file=sys.stderr)
+
+    return list(dict.fromkeys(ips))  # de-dup, preserve order
+
+
+def sync_full(cur, pcur, node_id):
+    """Complete rebuild -- the safety net, always correct even if
+    incremental sync was never run or its watermark is stale.
+
+    v3: no more "global" trunks/groups/profiles -- everything is
+    node-scoped now, so every query below filters on node_id
+    directly rather than the old (node_id = X OR node_id IS NULL)
+    pattern. DIDs/rules are scoped transitively via routing_profile_id,
+    which is itself node-scoped, so filtering profiles to this node
+    is sufficient to keep another node's DIDs/rules out.
+    """
+
+    trunks = fetch_all(pcur, "SELECT * FROM platform_trunks WHERE node_id = %s", (node_id,))
+    trunk_setid_by_id = {t['id']: t['dispatcher_setid'] for t in trunks}
+    # Trunk-scope rate-limit data, fetched here (rather than reusing
+    # the larger `pipes` query further below, which runs AFTER the
+    # Entry B construction loop that needs this) specifically so it's
+    # available in time -- folded into Entry B's own value string
+    # (item 15 of the SQL-to-htable optimization pass), also the
+    # vehicle for the earlier-confirmed correctness fix moving trunk-
+    # scope rate limiting from the outbound-sending path to inbound
+    # trunk-identity resolution, matching every other scope's inbound-
+    # defense philosophy.
+    trunk_rl_rows = fetch_all(pcur,
+        "SELECT trunk_id, name, algorithm, limit_value FROM platform_rate_limit_pipes "
+        "WHERE node_id = %s AND scope_type = 'trunk' AND enabled = true", (node_id,))
+    trunk_rate_limit_by_trunk_id = {r['trunk_id']: r for r in trunk_rl_rows}
+    trunk_ids = tuple(t['id'] for t in trunks) or (-1,)
+    trunk_numbers = fetch_all(pcur, "SELECT * FROM platform_trunk_numbers WHERE trunk_id IN %s", (trunk_ids,))
+    trunk_numbers_by_trunk_id = {}
+    for tn in trunk_numbers:
+        trunk_numbers_by_trunk_id.setdefault(tn['trunk_id'], []).append(tn)
+
+    trunk_custom_headers_rows = fetch_all(pcur, "SELECT trunk_id, header_line FROM platform_trunk_custom_headers WHERE trunk_id IN %s ORDER BY id", (trunk_ids,))
+    trunk_custom_headers_by_id = {}
+    for r in trunk_custom_headers_rows:
+        trunk_custom_headers_by_id.setdefault(r['trunk_id'], []).append(r['header_line'])
+    trunk_strip_headers_rows = fetch_all(pcur, "SELECT trunk_id, header_name FROM platform_trunk_strip_headers WHERE trunk_id IN %s ORDER BY id", (trunk_ids,))
+    trunk_strip_headers_by_id = {}
+    for r in trunk_strip_headers_rows:
+        trunk_strip_headers_by_id.setdefault(r['trunk_id'], []).append(r['header_name'])
+
+    groups = fetch_all(pcur, "SELECT * FROM platform_gateway_groups WHERE node_id = %s", (node_id,))
+    group_by_id = {g['id']: g for g in groups}
+    group_setid_by_id = {g['id']: g['setid'] for g in groups}
+    group_members = fetch_all(pcur, """
+        SELECT gateway_group_id AS group_id, id AS trunk_id, priority, weight
+        FROM platform_trunks WHERE gateway_group_id IS NOT NULL AND node_id = %s
+    """, (node_id,))
+
+    profiles = fetch_all(pcur, "SELECT * FROM platform_routing_profiles WHERE node_id = %s", (node_id,))
+    profile_ids = tuple(p['id'] for p in profiles) or (-1,)
+
+    # engine_type='blocklist' data -- only blocklists actually
+    # referenced by a routing profile on this node, same "sync only
+    # what's referenced" principle used for ACLs/rate plans elsewhere
+    # in this script.
+    referenced_blocklist_ids = tuple(
+        bid for p in profiles for bid in (p.get('called_blocklist_id'), p.get('calling_blocklist_id')) if bid
+    ) or (-1,)
+    blocklists = fetch_all(pcur, "SELECT * FROM platform_blocklists WHERE id IN %s", (referenced_blocklist_ids,))
+    blocklist_entries_rows = fetch_all(pcur,
+        "SELECT * FROM platform_blocklist_entries WHERE blocklist_id IN %s", (referenced_blocklist_ids,))
+
+    # engine_type='arithmetic' rule chains -- fetched here, populated
+    # into routing_profile_data (a separate htable from subscriber_auth,
+    # keyed by routing_profile_id alone) further down, per the
+    # finalized design's decision to NOT unify bridge and arithmetic
+    # storage (bridge's worst case fits comfortably in subscriber_auth;
+    # arithmetic's variable-length rule-list structure would force
+    # widening that shared table for every entry just to accommodate a
+    # case only arithmetic-type profiles need).
+    arithmetic_rules = fetch_all(pcur,
+        "SELECT * FROM platform_routing_arithmetic_rules WHERE routing_profile_id IN %s ORDER BY routing_profile_id, order_index",
+        (profile_ids,))
+    arithmetic_rule_ids = tuple(r['id'] for r in arithmetic_rules) or (-1,)
+    arithmetic_conditions = fetch_all(pcur,
+        "SELECT * FROM platform_routing_arithmetic_conditions WHERE rule_id IN %s ORDER BY rule_id, order_index",
+        (arithmetic_rule_ids,))
+
+    # platform_dids retired -- a DID is now just a full-length-prefix
+    # row in platform_routing_rules, fetched below with everything else.
+    rules = fetch_all(pcur, "SELECT * FROM platform_routing_rules WHERE enabled = true AND routing_profile_id IN %s ORDER BY priority", (profile_ids,))
+
+    # v3: subscribers now belong to a Domain, and only LOCAL domains
+    # have real subscribers at all (proxy domains route via
+    # primary/secondary trunk instead -- no REGISTER relay, see
+    # platform_domains.domain_type). Only sync domains actually
+    # enabled on one of THIS node's SIP Profiles, not the whole
+    # global domain library -- same "sync only what's referenced"
+    # principle already used for rate tables.
+    sip_profiles = fetch_all(pcur, "SELECT * FROM platform_sip_profiles WHERE node_id = %s", (node_id,))
+    sip_profile_ids = tuple(p['id'] for p in sip_profiles) or (-1,)
+
+    # Per-SIP-Profile identity allowlist (EIP/local-IP + any
+    # admin-added realms/hostnames) -- Call 1's "R-URI host matches
+    # our own address" signature, per the finalized design. Synced
+    # into subscriber_auth alongside subscriber and trunk_realm
+    # entries below.
+    sip_profile_identity_rows = fetch_all(pcur,
+        "SELECT sip_profile_id, value FROM platform_sip_profile_identities WHERE sip_profile_id IN %s",
+        (sip_profile_ids,))
+
+    # server_header/user_agent_header per-SIP-Profile override removed
+    # -- moved to node-level-only configuration per explicit request.
+    # See DESIGN.md for the reasoning (server_header's per-profile
+    # tier was confirmed completely non-functional at runtime despite
+    # having full UI/DB support; user_agent_header's was functional
+    # but scope-mismatched against what the UI promised).
+
+    # Media Profiles are GLOBAL objects (like domains) -- not filtered
+    # by node_id. Only pull the ones actually referenced by something
+    # on this node, rather than the whole global table, mirroring how
+    # domain-related data is scoped to what this node's SIP Profiles
+    # actually use.
+    media_profile_ids_referenced = set()
+    for p in sip_profiles:
+        if p.get('default_media_profile_id'):
+            media_profile_ids_referenced.add(p['default_media_profile_id'])
+    _trunk_mp_rows = fetch_all(pcur, "SELECT media_profile_id FROM platform_trunks WHERE node_id = %s AND media_profile_id IS NOT NULL", (node_id,))
+    media_profile_ids_referenced.update(r['media_profile_id'] for r in _trunk_mp_rows)
+    _group_mp_rows = fetch_all(pcur, "SELECT media_profile_id FROM platform_gateway_groups WHERE node_id = %s AND media_profile_id IS NOT NULL", (node_id,))
+    media_profile_ids_referenced.update(r['media_profile_id'] for r in _group_mp_rows)
+    _domain_junction_mp_rows = fetch_all(pcur, "SELECT media_profile_id FROM platform_sip_profile_domains WHERE sip_profile_id IN %s AND media_profile_id IS NOT NULL", (sip_profile_ids,))
+    media_profile_ids_referenced.update(r['media_profile_id'] for r in _domain_junction_mp_rows)
+    _rule_mp_rows = fetch_all(pcur, "SELECT media_profile_id FROM platform_routing_rules WHERE media_profile_id IS NOT NULL")
+    media_profile_ids_referenced.update(r['media_profile_id'] for r in _rule_mp_rows)
+
+    media_profiles_by_id = {}
+    if media_profile_ids_referenced:
+        _mp_rows = fetch_all(pcur, "SELECT * FROM platform_media_profiles WHERE id IN %s", (tuple(media_profile_ids_referenced),))
+        media_profiles_by_id = {m['id']: m for m in _mp_rows}
+
+    enabled_domain_ids = fetch_all(pcur, """
+        SELECT DISTINCT domain_id FROM platform_sip_profile_domains WHERE sip_profile_id IN %s
+    """, (sip_profile_ids,))
+    domain_id_list = tuple(d['domain_id'] for d in enabled_domain_ids) or (-1,)
+    domains = fetch_all(pcur, "SELECT * FROM platform_domains WHERE id IN %s", (domain_id_list,))
+    local_domain_ids = tuple(d['id'] for d in domains if d['domain_type'] == 'local') or (-1,)
+    subscribers = fetch_all(pcur, "SELECT * FROM platform_subscribers WHERE enabled = true AND domain_id IN %s", (local_domain_ids,))
+    subscriber_ids = tuple(s['id'] for s in subscribers) or (-1,)
+    subscriber_numbers = fetch_all(pcur, "SELECT * FROM platform_subscriber_numbers WHERE subscriber_id IN %s", (subscriber_ids,))
+    subscriber_numbers_by_subscriber_id = {}
+    for sn in subscriber_numbers:
+        subscriber_numbers_by_subscriber_id.setdefault(sn['subscriber_id'], []).append(sn)
+
+    domain_custom_headers_rows = fetch_all(pcur, "SELECT domain_id, header_line FROM platform_domain_custom_headers WHERE domain_id IN %s ORDER BY id", (domain_id_list,))
+    domain_custom_headers_by_id = {}
+    for r in domain_custom_headers_rows:
+        domain_custom_headers_by_id.setdefault(r['domain_id'], []).append(r['header_line'])
+    domain_strip_headers_rows = fetch_all(pcur, "SELECT domain_id, header_name FROM platform_domain_strip_headers WHERE domain_id IN %s ORDER BY id", (domain_id_list,))
+    domain_strip_headers_by_id = {}
+    for r in domain_strip_headers_rows:
+        domain_strip_headers_by_id.setdefault(r['domain_id'], []).append(r['header_name'])
+    subscriber_forwarding = fetch_all(pcur, "SELECT * FROM platform_subscriber_forwarding WHERE subscriber_id IN %s", (subscriber_ids,))
+
+    # v3: ACLs -- only the ones actually attached to a domain or trunk
+    # synced to this node (same "sync only what's referenced"
+    # principle). CIDR entries land in the existing `address` table
+    # (grp = 10000 + domain_id for domains) so Kamailio's own
+    # allow_address() does the matching. Trunk ACLs use a different
+    # target entirely -- see the trunk sync loop below, where they land
+    # in grp=1, the SAME group the trunk's own single ip_addr already
+    # uses -- deliberately additive to that existing exact-IP trust,
+    # not a separate/parallel mechanism, so allow_source_address("1")
+    # picks them up with zero kamailio.cfg changes needed.
+    trunk_id_list = tuple(t['id'] for t in trunks) or (-1,)
+    trunk_acl_ids = fetch_all(pcur, "SELECT DISTINCT acl_id FROM platform_trunk_acls WHERE trunk_id IN %s", (trunk_id_list,))
+    subscriber_id_list_for_acls = tuple(s['id'] for s in subscribers) or (-1,)
+    subscriber_acl_ids = fetch_all(pcur, "SELECT DISTINCT acl_id FROM platform_subscriber_acls WHERE subscriber_id IN %s", (subscriber_id_list_for_acls,))
+    acl_ids = fetch_all(pcur, "SELECT DISTINCT acl_id FROM platform_domain_acls WHERE domain_id IN %s", (domain_id_list,))
+    acl_id_list = tuple({a['acl_id'] for a in acl_ids} | {a['acl_id'] for a in trunk_acl_ids} | {a['acl_id'] for a in subscriber_acl_ids}) or (-1,)
+    acl_entries = fetch_all(pcur, "SELECT * FROM platform_acl_entries WHERE acl_id IN %s", (acl_id_list,))
+    domain_acls_map = fetch_all(pcur, "SELECT domain_id, acl_id FROM platform_domain_acls WHERE domain_id IN %s", (domain_id_list,))
+    trunk_acls_map = fetch_all(pcur, "SELECT trunk_id, acl_id FROM platform_trunk_acls WHERE trunk_id IN %s", (trunk_id_list,))
+    subscriber_acls_map = fetch_all(pcur, "SELECT subscriber_id, acl_id FROM platform_subscriber_acls WHERE subscriber_id IN %s", (subscriber_id_list_for_acls,))
+    # Shared by both the trunk sync loop (below) and the domain ACL
+    # sync section (further down) -- built once here rather than
+    # duplicated in each.
+    entries_by_acl = {}
+    for e in acl_entries:
+        entries_by_acl.setdefault(e['acl_id'], []).append(e)
+    trunk_acl_entries = {}
+    for link in trunk_acls_map:
+        trunk_acl_entries.setdefault(link['trunk_id'], []).append(link['acl_id'])
+    subscriber_acl_entries = {}
+    for link in subscriber_acls_map:
+        subscriber_acl_entries.setdefault(link['subscriber_id'], []).append(link['acl_id'])
+
+    # Resolved routing-profile-per-domain-per-SIP-Profile: junction
+    # override if set, else that SIP Profile's own (mandatory-in-the-
+    # UI) default. Resolved here at sync time rather than at request
+    # time -- one less runtime lookup per REGISTER/INVITE.
+    sip_profile_default_profile = {p['id']: p.get('default_routing_profile_id') for p in sip_profiles}
+    profile_domain_routing = fetch_all(pcur, """
+        SELECT sip_profile_id, domain_id, routing_profile_id FROM platform_sip_profile_domains
+        WHERE sip_profile_id IN %s
+    """, (sip_profile_ids,))
+
+    cur.execute("DELETE FROM address")
+    cur.execute("DELETE FROM dispatcher")
+    cur.execute("DELETE FROM routing_profiles")
+    cur.execute("DELETE FROM media_profiles")
+    cur.execute("DELETE FROM media_profiles_ht")
+    cur.execute("DELETE FROM source_profile")
+    cur.execute("DELETE FROM trunk_ip_identity")
+    cur.execute("DELETE FROM trunk_ping_identity")
+    cur.execute("DELETE FROM sip_profile_identity")
+    cur.execute("DELETE FROM route_prefixes")
+    cur.execute("DELETE FROM route_regex")
+    cur.execute("DELETE FROM subscriber")
+    cur.execute("DELETE FROM uacreg")
+    cur.execute("DELETE FROM credentials")
+    cur.execute("DELETE FROM trunk_credentials_ht")
+    cur.execute("DELETE FROM trunk_inbound_policy")
+    cur.execute("DELETE FROM domain_settings")
+    cur.execute("DELETE FROM subscriber_meta")
+    # Real production incident found this session: unlike every table
+    # above, trunk_fqdns was NEVER cleared here -- each sync cycle just
+    # appended more rows for the same hostname trunk(s) without ever
+    # removing stale ones, so the table grew unbounded over many sync
+    # cycles. route[CHECK_FQDN_TRUST]'s while loop scans every row on
+    # each unauthorized-source request; once the accumulated duplicate
+    # count crossed 100, Kamailio's runaway-loop protection (hard cap:
+    # 100 iterations) started aborting the check outright on every such
+    # request -- "ERROR: <core> [core/action.c]: do_action(): runaway
+    # while: more than 100 loops" -- burning CPU on every attack attempt
+    # AND silently truncating the trust scan itself (a genuine match
+    # later in the row list could be missed once the cap hit).
+    cur.execute("DELETE FROM trunk_fqdns")
+
+    # No default-routing-plan fallback -- dropped entirely per explicit
+    # design decision. A trunk (or anything else) with no explicit
+    # routing_profile_id genuinely has no routing profile at all: no
+    # source_profile row gets written for it below (a missing row is a
+    # clear, diagnosable "not configured" state; a NULL profile_id row
+    # was the real bug found this session -- silently written, silently
+    # matched nothing in kamailio.cfg, every call failing 404 with no
+    # error anywhere pointing at why). Warn once per sync, loudly, so
+    # this is visible in the sync log instead of only showing up as an
+    # unexplained call failure.
+    unrouted_trunks = [t['name'] for t in trunks if not t.get('routing_profile_id')]
+    if unrouted_trunks:
+        log.warning(f"Node {node_id}: {len(unrouted_trunks)} trunk(s) have no routing plan assigned "
+                    f"({', '.join(unrouted_trunks)}) -- inbound calls from these will get 404 No Route "
+                    f"Found until a routing plan is explicitly set on each.")
+    domain_name_by_id = {d['id']: d['name'] for d in domains}
+    subscriber_by_id = {s['id']: s for s in subscribers}
+
+    # Outbound-leg media profile resolution: trunk's own override,
+    # else that trunk's SIP Profile's mandatory default. Resolved here
+    # at sync time (same principle as routing-profile resolution
+    # above) -- kamailio.cfg just reads one already-resolved value out
+    # of the dispatcher attrs string, no runtime lookup needed for
+    # this part of the chain.
+    sip_profile_default_media_profile = {p['id']: p.get('default_media_profile_id') for p in sip_profiles}
+    # Topology hiding inheritance root -- trunk/domain topoh_mask_*
+    # columns are nullable (NULL = inherit this). Resolved once here
+    # at sync time, same principle as media-profile resolution just
+    # above -- kamailio.cfg reads an already-resolved 0/1, no
+    # inheritance logic needed in the config language itself.
+    sip_profile_topoh_by_id = {p['id']: (p.get('topoh_mask_inbound', True), p.get('topoh_mask_outbound', True)) for p in sip_profiles}
+    sip_profile_addr_by_id = {p['id']: (p['ip_addr'], p['port']) for p in sip_profiles}
+    trunk_resolved_media_profile_by_id = {}
+
+    # ── Trunks: address (unified trust grp=1) + dispatcher (unique setid) ──
+    cur.execute("DELETE FROM dispatcher_setid_alg")
+    cur.execute("DELETE FROM dispatcher_setid_alg_ht")
+    for t in trunks:
+        if not t['enabled']:
+            continue
+        setid = trunk_setid_by_id[t['id']]
+        # Individual trunk setid is always single-member -- algorithm
+        # choice genuinely doesn't matter here, 4 (round-robin) is a
+        # safe, harmless default.
+        cur.execute("INSERT OR REPLACE INTO dispatcher_setid_alg (setid, alg) VALUES (?,'4')", (setid,))
+        cur.execute("INSERT OR REPLACE INTO dispatcher_setid_alg_ht (key_name, key_value) VALUES (?,'4')", (str(setid),))
+        cur.execute("INSERT INTO address (grp, ip_addr, mask, port, tag) VALUES (1,?,32,?,?)",
+                    (t['ip_addr'], t['port'], t['name']))
+
+        # Real bug found in production: for a trunk configured with a
+        # HOSTNAME (like PBXact17 -- pbxact17.sangoma.cloud) rather
+        # than a bare IP, the address-table row above is dead weight
+        # -- allow_source_address() does exact IP matching, and a
+        # hostname string can never match a real source IP, so it
+        # always fails for these trunks. kamailio.cfg already has a
+        # fallback specifically for this (route[CHECK_FQDN_TRUST],
+        # querying trunk_fqdns via dns_int_match_ip()) -- but nothing
+        # ever populated that table, so every inbound call from a
+        # hostname-based trunk was silently rejected with 403
+        # Forbidden regardless. Confirmed via a live packet/log trace
+        # against a real node: allow_source_address() failed, the
+        # trunk_fqdns query returned zero rows, and the call was
+        # rejected -- not a network or firewall issue, purely this
+        # missing sync step.
+        # Per user: DNS-based trust is inherently riskier than static
+        # ACL matching (a compromised/hijacked DNS response could
+        # redirect trust to an attacker-controlled IP) -- explicit
+        # per-trunk opt-in required, default OFF. A literal IP here is
+        # completely unaffected either way (nothing to "trust via DNS"
+        # for something that was never a hostname), so the ValueError
+        # branch below runs regardless of the toggle; only the "this
+        # is a hostname, trust it via live DNS" branch is gated.
+        #
+        # Also gated to digest mode specifically, not just the toggle
+        # -- confirmed with the user: ip-mode trunks must NEVER trust a
+        # DNS-resolved IP, full stop, regardless of this checkbox. Only
+        # digest-mode trunks have a credential backstop that makes DNS
+        # trust a defense-in-depth addition rather than the sole thing
+        # standing between an attacker and full trust.
+        if t.get('trust_dns_resolved_ip') and t.get('inbound_auth_mode') == 'digest':
+            try:
+                ipaddress.ip_address(t['ip_addr'])
+            except ValueError:
+                cur.execute("INSERT INTO trunk_fqdns (hostname, trunk_setid) VALUES (?,?)",
+                            (t['ip_addr'], setid))
+
+        # outbound_proxy, if set and a hostname (not a bare IP) --
+        # same reasoning as ip_addr above: a trunk that sends inbound
+        # traffic from the same host it's configured to send outbound
+        # traffic to should be trusted for that too, via the same
+        # already-working CHECK_FQDN_TRUST mechanism, without needing
+        # a separate manual ACL entry. Strip any port first (stored as
+        # host or host:port; IPv6 as [host]:port) -- trunk_fqdns
+        # expects a bare hostname, same as dns_int_match_ip() takes.
+        # Same trust_dns_resolved_ip + digest-mode gate as above -- one
+        # checkbox covers both fields, matching the user's own framing
+        # of this as "resolved names of ip/hostname AND outbound proxy
+        # field", and neither field is ever DNS-trusted for ip-mode.
+        outbound_proxy = t.get('outbound_proxy') or ''
+        if outbound_proxy and t.get('trust_dns_resolved_ip') and t.get('inbound_auth_mode') == 'digest':
+            if outbound_proxy.startswith('['):
+                op_host = outbound_proxy[1:outbound_proxy.find(']')]
+            elif ':' in outbound_proxy and outbound_proxy.count(':') == 1:
+                op_host = outbound_proxy.rsplit(':', 1)[0]
+            else:
+                op_host = outbound_proxy
+            try:
+                ipaddress.ip_address(op_host)
+            except ValueError:
+                cur.execute("INSERT INTO trunk_fqdns (hostname, trunk_setid) VALUES (?,?)",
+                            (op_host, setid))
+
+        # Trunk ACLs -- additional trusted source IPs/CIDR ranges on
+        # top of the trunk's own single ip_addr above, for Peer trunks
+        # with no Digest auth (source-IP matching is the only
+        # authentication they have). Deliberately the SAME grp=1 pool
+        # the trunk's own IP already uses, not a separate group -- so
+        # allow_source_address("1") in kamailio.cfg picks these up
+        # with zero script changes, matching the domain ACL sync's own
+        # "reuse Kamailio's native CIDR-matching address table" design
+        # rather than inventing a parallel mechanism.
+        #
+        # Passing allow_source_address("1") is NOT sufficient on its
+        # own for a call to actually complete, though -- Stage 3 of
+        # the finalized design (is_in_subnet()-based trunk identity
+        # resolution) still needs to know WHICH trunk matched. This
+        # used to populate source_profile (an EXACT ip_addr ->
+        # profile_id table, no mask/CIDR column at all, capped at /24
+        # for ACL ranges since it had no native range support to fall
+        # back on) -- replaced here with trunk_identity_candidates,
+        # which stores the CIDR/IP directly with NO expansion and NO
+        # cap at all, since is_in_subnet() tests containment against
+        # the stored range directly at runtime (confirmed live-tested
+        # earlier this session, including the historically-buggy
+        # non-network-aligned-base case) rather than needing every
+        # individual host pre-enumerated.
+        trunk_profile_id = t.get('routing_profile_id')
+        resolved_media_profile_id = t.get('media_profile_id') or sip_profile_default_media_profile.get(t['sip_profile_id']) or 0
+        if trunk_profile_id is not None:
+            try:
+                # Literal IP -- always safe, no DNS resolution involved,
+                # unaffected by the trust_dns_resolved_ip toggle.
+                ipaddress.ip_address(t['ip_addr'])
+                candidate_ips = [t['ip_addr']]
+            except ValueError:
+                # Genuine hostname -- only resolved when this trunk has
+                # BOTH explicitly opted into DNS-based trust AND is
+                # digest mode (see trunk_fqdns gating above -- ip-mode
+                # trunks must never trust a DNS-resolved IP under any
+                # circumstance, since they have no credential backstop
+                # the way digest-mode trunks do).
+                candidate_ips = (resolve_trunk_ips(t['ip_addr'])
+                                 if t.get('trust_dns_resolved_ip') and t.get('inbound_auth_mode') == 'digest'
+                                 else [])
+            # outbound_proxy, if a literal IP -- a genuine, admin-
+            # configured trust source (never DNS-resolved), so this
+            # applies regardless of auth mode or the DNS-trust toggle,
+            # same as ip_addr's own literal-IP case above. Confirmed
+            # with the user: trust always comes from an ACL, ip_addr
+            # being a literal IP, or outbound_proxy being a literal
+            # IP -- never a resolved DNS IP, under any circumstance.
+            outbound_proxy_raw = t.get('outbound_proxy') or ''
+            if outbound_proxy_raw:
+                if outbound_proxy_raw.startswith('['):
+                    op_host = outbound_proxy_raw[1:outbound_proxy_raw.find(']')]
+                elif ':' in outbound_proxy_raw and outbound_proxy_raw.count(':') == 1:
+                    op_host = outbound_proxy_raw.rsplit(':', 1)[0]
+                else:
+                    op_host = outbound_proxy_raw
+                try:
+                    ipaddress.ip_address(op_host)
+                    candidate_ips.append(op_host)
+                except ValueError:
+                    pass
+            for resolved_ip in candidate_ips:
+                # Call 2 -- keyed by Ri:Rp:ip (this SIP Profile's own
+                # listener + the source IP) rather than plain IP, so
+                # two trunks on DIFFERENT SIP Profiles with
+                # coincidentally overlapping IPs cannot collide -- the
+                # save-time collision guard only prevents overlap
+                # within the same profile. Replaces the old
+                # trunk_identity_candidates population entirely --
+                # nothing reads that table anymore now that Stage 3 is
+                # a direct htable lookup instead of a SQL query.
+                ip_identity_value = f"{t['id']}|{t['name']}|{t['sip_profile_id']}|{trunk_profile_id}|{resolved_media_profile_id}"
+                ip_listener = sip_profile_addr_by_id.get(t['sip_profile_id'])
+                if ip_listener:
+                    cur.execute("INSERT OR REPLACE INTO trunk_ip_identity (key_name, key_value) VALUES (?,?)",
+                                (f"{ip_listener[0]}:{ip_listener[1]}:{resolved_ip}", ip_identity_value))
+        for acl_id in trunk_acl_entries.get(t['id'], []):
+            for e in entries_by_acl.get(acl_id, []):
+                # Only 'allow' entries apply here -- unlike the domain
+                # ACL sync below, which splits allow/deny into two
+                # separate groups kamailio.cfg checks in order, grp=1
+                # is purely an allowlist with no deny semantics at all
+                # (it's just "is this a known trunk source, yes/no").
+                # A 'deny' entry on a trunk ACL is accepted by the UI
+                # (same reusable ACL entity as domains use) but has no
+                # effect here -- deliberate, not a silent gap.
+                if e.get('action') == 'deny':
+                    continue
+                cidr = e['cidr']
+                expanded_ips = expand_acl_cidr_to_ips(cidr)
+                if expanded_ips is None:
+                    print(f"WARN: trunk {t['name']!r} ACL entry {cidr!r} could not be expanded "
+                          f"for the address table (unparseable or exceeds the expansion limit) -- "
+                          f"skipped entirely.", file=sys.stderr)
+                else:
+                    for ip in expanded_ips:
+                        cur.execute("INSERT INTO address (grp, ip_addr, mask, port, tag) VALUES (1,?,32,0,?)",
+                                    (ip, t['name']))
+                if trunk_profile_id is None:
+                    continue
+                # Call 2: expand this ACL entry into individual IPs for
+                # trunk_ip_identity -- the application-level /28
+                # (max 16 addresses) cap on this platform's ACL editor
+                # should already bound every entry reaching here, but
+                # defensively re-capped rather than trusting that
+                # invariant blindly (e.g. data saved before the cap
+                # existed). Skips (does not silently truncate) any
+                # entry too wide to expand safely -- a wide, unexpanded
+                # ACL entry is a real misconfiguration worth surfacing,
+                # not something to partially and confusingly apply.
+                try:
+                    network = ipaddress.ip_network(cidr, strict=False)
+                    if network.num_addresses > 256:
+                        print(f"WARN: trunk {t['name']!r} ACL entry {cidr} has {network.num_addresses} "
+                              f"addresses -- exceeds this sync script's defensive expansion limit (256), "
+                              f"skipped entirely for trunk_ip_identity. The platform's own ACL editor caps "
+                              f"new entries at /28 (16 addresses); this indicates older, pre-cap data.",
+                              file=sys.stderr)
+                    else:
+                        ip_identity_value = f"{t['id']}|{t['name']}|{t['sip_profile_id']}|{trunk_profile_id}|{resolved_media_profile_id}"
+                        acl_listener = sip_profile_addr_by_id.get(t['sip_profile_id'])
+                        if acl_listener:
+                            for host in network.hosts() if network.num_addresses > 1 else [network.network_address]:
+                                cur.execute("INSERT OR REPLACE INTO trunk_ip_identity (key_name, key_value) VALUES (?,?)",
+                                            (f"{acl_listener[0]}:{acl_listener[1]}:{host}", ip_identity_value))
+                            # hosts() excludes network/broadcast for a real
+                            # subnet -- for a /28 trust boundary (not a real
+                            # subnet with meaningful network/broadcast
+                            # addresses), also include those two explicitly
+                            # so a source IP matching either isn't silently
+                            # unmatched. Open question per the design doc,
+                            # not yet resolved with the user -- defaulting
+                            # to including all addresses (the more permissive,
+                            # "any address in the trust range matches"
+                            # reading) until confirmed otherwise.
+                            if network.num_addresses > 2:
+                                for edge in (network.network_address, network.broadcast_address):
+                                    cur.execute("INSERT OR REPLACE INTO trunk_ip_identity (key_name, key_value) VALUES (?,?)",
+                                                (f"{acl_listener[0]}:{acl_listener[1]}:{edge}", ip_identity_value))
+                except ValueError as ex:
+                    print(f"WARN: trunk {t['name']!r} ACL entry {cidr!r} could not be parsed for "
+                          f"trunk_ip_identity expansion: {ex}", file=sys.stderr)
+
+        # trunk_meta retired -- strip/prepend now travels in this same
+        # attrs string (already used for dtmf/nat/srtp/sess_timers),
+        # read by kamailio.cfg right after ds_select_dst() picks this
+        # trunk. Only ever applied when a trunk is actually selected --
+        # structurally can't reach the "route to user" destination path.
+        # Real bug found in production: dispatcher's attrs column gets
+        # parsed by Kamailio's own generic param-body parser (the same
+        # one used for SIP header params), which chokes on a bare
+        # empty value like `prepend=;` -- confirmed against a real
+        # Kamailio instance: `pack_dest(): cannot set attributes!`,
+        # and the destination gets silently skipped from the whole
+        # dispatcher set on every reload. Quoting the value fixes it
+        # for both the empty and populated case -- verified both
+        # together against the real parser before shipping this.
+        prepend_val = t['prepend_digits'] or ''
+        trunk_resolved_media_profile_by_id[t['id']] = resolved_media_profile_id
+        # dtmf_mode/srtp_mode/fax_mode moved to platform_media_profiles
+        # this session (genuinely per-call settings, not trunk-identity
+        # properties) -- resolved from the same media_profiles_by_id
+        # lookup and resolved_media_profile_id already computed just
+        # above for the media_profile= attr itself, not a new query.
+        # Sensible fallback defaults if resolution somehow comes up
+        # empty (shouldn't happen once every install auto-creates a
+        # Default profile, but defensive regardless).
+        _mp = media_profiles_by_id.get(resolved_media_profile_id, {})
+        trunk_fax_mode = _mp.get('fax_mode') or 'passthrough'
+        # Topology hiding -- trunk's own explicit value if set (not
+        # NULL), else inherit the SIP Profile's.
+        _sp_topoh_in, _sp_topoh_out = sip_profile_topoh_by_id.get(t['sip_profile_id'], (True, True))
+        topoh_in = t['topoh_mask_inbound'] if t.get('topoh_mask_inbound') is not None else _sp_topoh_in
+        topoh_out = t['topoh_mask_outbound'] if t.get('topoh_mask_outbound') is not None else _sp_topoh_out
+        # Only emit custom_hdrN= when that field actually has a value --
+        # an empty, unquoted attrs value (key=;) is what breaks the
+        # dispatcher module's own attrs parser, confirmed via direct
+        # testing against the real module. This is different from
+        # every other optional field above (in_cid_name="", etc.),
+        # which are all wrapped in literal quotes -- an empty
+        # quoted-string is still a valid token, so those never hit
+        # this. custom_hdrs is the only unquoted one now (ua_override
+        # removed -- User-Agent moved to node-level-only), since a
+        # quoted base64 value adds no protection here anyway (base64
+        # can't produce a `"` itself).
+        interop_parts = []
+        custom_hdrs_list = trunk_custom_headers_by_id.get(t['id'], [])
+        if custom_hdrs_list:
+            encoded = "|".join(base64.b64encode(h.encode()).decode() for h in custom_hdrs_list)
+            interop_parts.append(f"custom_hdrs={encoded}")
+        strip_hdrs_list = trunk_strip_headers_by_id.get(t['id'], [])
+        if strip_hdrs_list:
+            interop_parts.append(f"strip_hdrs={'|'.join(strip_hdrs_list)}")
+        attrs = (f"sess_timers={'1' if t['session_timers'] else '0'};"
+                 f"strip={t['strip_digits'] or 0};prepend=\"{prepend_val}\";"
+                 f"trace={'1' if t.get('trace_enabled') else '0'};record={'1' if t.get('record_enabled') else '0'};"
+                 f"media_profile={resolved_media_profile_id};max_channels={t.get('max_channels') or 0};"
+                 f"sip_profile={t['sip_profile_id']};fax_mode={trunk_fax_mode};"
+                 f"outbound_proxy=\"{t.get('outbound_proxy') or ''}\";"
+                 f"weight={t.get('weight') or 1};rweight={t.get('rweight') or 1};duid={t['id']};"
+                 f"cc={'1' if t.get('congestion_control_enabled') else '0'};"
+                 f"in_cid_name=\"{t.get('inbound_callerid_name') or ''}\";"
+                 f"in_cid_mode={t.get('inbound_callerid_mode') or 'allow_any'};"
+                 f"in_cid_custom=\"{t.get('inbound_callerid_custom_number') or ''}\";"
+                 f"in_cid_forced=\"{t.get('inbound_callerid_forced_number') or ''}\";"
+                 f"in_pai_rpid={'1' if t.get('inbound_use_pai_rpid_incoming') else '0'};"
+                 f"in_called_source={t.get('inbound_called_number_source') or 'request_uri'};"
+                 f"out_cid_method={t.get('outbound_callerid_method') or 'from_header'};"
+                 f"out_cid_mode={t.get('outbound_callerid_mode') or 'allow_any'};"
+                 f"out_cid_custom=\"{t.get('outbound_callerid_custom_number') or ''}\";"
+                 f"out_cid_forced=\"{t.get('outbound_callerid_forced_number') or ''}\";"
+                 f"out_called={t.get('outbound_called_number_placement') or 'request_uri'};"
+                 f"out_uri_format={t.get('outbound_number_uri_format') or 'sip_uri'};"
+                 f"out_privacy={t.get('outbound_privacy_mode') or 'none'};"
+                 f"from_domain_mode={t.get('outbound_from_domain_mode') or 'transparent'};"
+                 f"custom_from_domain=\"{t.get('register_from_domain') or ''}\";"
+                 f"ruri_user={t.get('outbound_ruri_user_source') or 'dialed_number'};"
+                 f"ruri_dom={t.get('outbound_ruri_domain_source') or 'node_address'};"
+                 f"ruri_fmt={t.get('outbound_ruri_uri_format') or 'sip_uri'};"
+                 f"to_same={'1' if t.get('outbound_to_same_as_ruri', True) else '0'};"
+                 f"to_user={t.get('outbound_to_user_source') or 'dialed_number'};"
+                 f"to_dom={t.get('outbound_to_domain_source') or 'node_address'};"
+                 f"to_fmt={t.get('outbound_to_uri_format') or 'sip_uri'};"
+                 f"trunk_host=\"{t['ip_addr']}:{t.get('port') or 5060}\";"
+                 f"reg_identity=\"{t.get('auth_user') or t.get('register_from_user') or ''}\";"
+                 f"registrar_host=\"{(t.get('register_uri') or '').removeprefix('sips:').removeprefix('sip:')}\";"
+                 f"topoh_in={'1' if topoh_in else '0'};topoh_out={'1' if topoh_out else '0'}"
+                 + ("".join(f";{p}" for p in interop_parts))
+                 # Per-destination ping_from override (confirmed via
+                 # dispatcher's own source: dest->attrs.ping_from sets
+                 # the From URI on this trunk's own OPTIONS keepalives)
+                 # -- only for digest-mode trunks that opted into DNS-
+                 # based trust, the only case needing ping-based
+                 # identification of which trunk a reply belongs to at
+                 # all. Driven from auth_username specifically, per
+                 # explicit instruction -- gives onreply_route a known,
+                 # controlled From-header to match against, rather than
+                 # guessing at dispatcher's default ping construction.
+                 + (f";ping_from=\"sip:{t.get('auth_user')}@{THIS_NODE_IP}\""
+                    if t.get('inbound_auth_mode') == 'digest' and t.get('trust_dns_resolved_ip') and t.get('auth_user')
+                    else ""))
+        dest = f"sip:{t['ip_addr']}:{t['port']}"
+        cur.execute("INSERT INTO dispatcher (setid, destination, flags, priority, attrs, description) VALUES (?,?,0,?,?,?)",
+                    (setid, dest, t['priority'], attrs, t['name']))
+        if t.get('inbound_auth_mode') == 'digest' and t.get('trust_dns_resolved_ip') and t.get('auth_user'):
+            cur.execute("INSERT OR REPLACE INTO trunk_ping_identity "
+                        "(auth_user, trunk_id, trunk_name, sip_profile_id, profile_id, media_profile_id) VALUES (?,?,?,?,?,?)",
+                        (t['auth_user'], t['id'], t['name'], t['sip_profile_id'],
+                         trunk_profile_id, resolved_media_profile_id))
+
+        if t.get('auth_enabled'):
+            realm = t.get('auth_realm') or t['ip_addr']
+            pw = t.get('auth_pass') or ''
+            cur.execute("INSERT INTO credentials (uuid, realm, username, password, ha1, trust_provider_realm) VALUES (?,?,?,?,?,?)",
+                        (f"trunk-{t['id']}", realm, t.get('auth_user') or '', pw,
+                         ha1(t.get('auth_user') or '', realm, pw) if pw else '',
+                         1 if t.get('trust_provider_realm', True) else 0))
+            cur.execute("INSERT INTO trunk_credentials_ht (key_name, key_value) VALUES (?,?)",
+                        (f"trunk-{t['id']}", f"{t.get('auth_user') or ''}|{pw}|{realm}|{1 if t.get('trust_provider_realm', True) else 0}"))
+
+        if t.get('register_enabled'):
+            pw = t.get('auth_pass') or ''
+            trust_realm = t.get('trust_provider_realm', True)
+            realm = '' if trust_realm else (t.get('auth_realm') or t['ip_addr'])
+            # register_from_domain was missing auth_realm as an
+            # intermediate fallback step -- jumped straight from the
+            # override field to ip_addr, skipping the trunk's own
+            # configured auth realm entirely. Fixed to match the same
+            # "override -> main auth setting -> ip_addr" chain used
+            # everywhere else, per explicit request that the Requires
+            # auth section's username/domain default everywhere
+            # relevant.
+            from_domain = t.get('register_from_domain') or t['ip_addr']
+            profile_addr = sip_profile_addr_by_id.get(t.get('sip_profile_id'))
+            reg_socket = f"{t.get('transport', 'udp')}:{profile_addr[0]}:{profile_addr[1]}" if profile_addr else ''
+            # contact_user column: confirmed via Kamailio's own uac
+            # module source that without this explicitly set, the
+            # Contact header's username defaults to l_uuid (our
+            # internal "trunk-N" id) -- NOT l_username, regardless of
+            # what's configured here -- which is exactly why some
+            # registrars (Asterisk/FreePBX's res_pjsip, confirmed live)
+            # reject the registration outright, unable to match
+            # "trunk-1" to any known extension/AOR. Same value already
+            # used for l_username (an internal lookup key only, never
+            # sent over the wire) reused here, since that's clearly
+            # what "Register contact user" was meant to control.
+            contact_user = t.get('register_contact_user') or t.get('auth_user') or t['name']
+            # REGISTER-based trust for the same digest+DNS-trust
+            # scenario trunk_ping_identity already covers (see the
+            # ping-based entry above) -- a successful outbound
+            # REGISTER is equally authoritative proof of where
+            # Kamailio's own DNS resolution landed, so this trunk
+            # shouldn't have to wait for the next OPTIONS ping cycle
+            # to become application-trusted (trunk_ip_identity). Keyed
+            # by contact_user specifically, NOT auth_user -- this is
+            # what the REGISTER reply's own mirrored From-header will
+            # actually contain (uacreg's l_uuid/l_username, built from
+            # this same contact_user value), which differs from
+            # auth_user whenever register_contact_user is explicitly
+            # set. The two commonly coincide (contact_user falls back
+            # to auth_user when unset), in which case this simply
+            # overwrites the same key with the same value.
+            if t.get('inbound_auth_mode') == 'digest' and t.get('trust_dns_resolved_ip') and t.get('auth_user'):
+                cur.execute("INSERT OR REPLACE INTO trunk_ping_identity "
+                            "(auth_user, trunk_id, trunk_name, sip_profile_id, profile_id, media_profile_id) VALUES (?,?,?,?,?,?)",
+                            (contact_user, t['id'], t['name'], t['sip_profile_id'],
+                             trunk_profile_id, resolved_media_profile_id))
+            cur.execute("""INSERT INTO uacreg
+                (l_uuid,l_username,l_domain,r_username,r_domain,realm,auth_username,auth_password,auth_ha1,auth_proxy,expires,flags,reg_delay,contact_addr,socket,contact_user)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,0,0,'',?,?)""",
+                (contact_user,
+                 contact_user,
+                 from_domain,
+                 t.get('register_from_user') or t.get('auth_user') or t['name'],
+                 from_domain,
+                 realm, t.get('auth_user') or '', pw,
+                 (ha1(t.get('auth_user') or '', realm, pw) if (pw and not trust_realm) else ''),
+                 t.get('register_uri') or f"sip:{t['ip_addr']}:{t['port']}",
+                 t.get('register_expire') or 3600, reg_socket, contact_user))
+
+        mode = t.get('inbound_auth_mode', 'ip')
+        # inbound_auth_user/inbound_auth_realm previously had NO
+        # fallback to the trunk's main auth_user/auth_realm at all --
+        # confirmed real gap: leaving inbound_auth_user blank silently
+        # skipped inbound digest auth setup entirely, even when the
+        # trunk's own auth username was already configured in the
+        # Requires auth section just above it in the UI. Per explicit
+        # request, the same username/realm used for this trunk's own
+        # outbound registration is exactly what should be expected
+        # back from it on inbound requests too, in the common case
+        # where both directions use the same credentials -- an admin
+        # who genuinely needs different inbound credentials still can,
+        # by filling in these fields explicitly, which continues to
+        # take priority over the default.
+        effective_inbound_user = t.get('inbound_auth_user') or t.get('auth_user')
+        effective_inbound_realm = t.get('inbound_auth_realm') or t.get('auth_realm') or t['ip_addr']
+        # Shared-realm redesign (finalized this session): the
+        # protocol-level challenge realm is always $rd (the SIP
+        # Profile's own advertised address), not this per-trunk
+        # effective_inbound_realm value -- confirmed necessary via
+        # Kamailio's own docs, since www_challenge() sends its reply
+        # immediately and cannot be called in a loop to build multiple
+        # per-trunk WWW-Authenticate headers in one response, which
+        # would have been the only way to give each trunk a genuinely
+        # distinct protocol-level realm. effective_inbound_realm is
+        # kept only for display/bookkeeping (shown in the UI), no
+        # longer fed into the actual challenge or the Entry B key.
+        #
+        # Also retires the old subscriber-table INSERT entirely: that
+        # existed only so www_authenticate("subscriber") could query it
+        # by DB lookup. The new design validates via pv_www_authenticate()
+        # with an explicit HA1 supplied directly from this same
+        # subscriber_auth entry -- zero DB queries during digest
+        # validation, so there is nothing left for that table to serve.
+        if mode == 'digest' and effective_inbound_user:
+            pw = t.get('inbound_auth_pass') or ''
+            trunk_listener = sip_profile_addr_by_id.get(t.get('sip_profile_id'))
+            if trunk_listener:
+                profile_rd = trunk_listener[0]
+                # Entry A -- challenge trigger. Simple marker, no
+                # per-trunk data at all (there is nothing to store yet
+                # -- identity isn't known until the challenged retry).
+                # Multiple digest trunks on the same SIP Profile all
+                # write this exact same key -- INSERT OR REPLACE makes
+                # that idempotent, not a collision.
+                trigger_key = f"{trunk_listener[0]}:{trunk_listener[1]}:{profile_rd}"
+                cur.execute("INSERT OR REPLACE INTO subscriber_auth (key_name, key_value) VALUES (?,?)",
+                            (trigger_key, "type=trunk_challenge"))
+                # Entry B -- credential + full routing identity, keyed
+                # by rd:username. Username alone disambiguates trunks
+                # sharing this same rd (see the realm+username
+                # collision guard on the manager side, corrected to
+                # username-only for exactly this reason).
+                entry_b_key = f"{profile_rd}:{effective_inbound_user}"
+                entry_b_ha1 = ha1(effective_inbound_user, profile_rd, pw) if pw else ''
+                trunk_trust_cidr_1 = t.get('inbound_trust_cidr_1') or ''
+                if trunk_trust_cidr_1 == '0.0.0.0/0':
+                    trunk_trust_cidr_1 = ''
+                trunk_trust_cidr_2 = t.get('inbound_trust_cidr_2') or ''
+                if trunk_trust_cidr_2 == '0.0.0.0/0':
+                    trunk_trust_cidr_2 = ''
+                trunk_rl = trunk_rate_limit_by_trunk_id.get(t['id'])
+                trunk_rl_name = trunk_rl['name'] if trunk_rl else ''
+                trunk_rl_algo = trunk_rl['algorithm'] if trunk_rl else ''
+                trunk_rl_limit = str(trunk_rl['limit_value']) if trunk_rl else ''
+                entry_b_value = (f"type=trunk|ha1={entry_b_ha1}|trunk_id={t['id']}|trunk_name={t['name']}|"
+                                  f"sip_profile_id={t['sip_profile_id']}|profile_id={trunk_profile_id}|"
+                                  f"media_profile_id={resolved_media_profile_id}|"
+                                  f"trust_cidr_1={trunk_trust_cidr_1}|trust_cidr_2={trunk_trust_cidr_2}|"
+                                  f"rl_name={trunk_rl_name}|rl_algo={trunk_rl_algo}|rl_limit={trunk_rl_limit}")
+                cur.execute("INSERT OR REPLACE INTO subscriber_auth (key_name, key_value) VALUES (?,?)",
+                            (entry_b_key, entry_b_value))
+                for tn in trunk_numbers_by_trunk_id.get(t['id'], []):
+                    if tn['number_type'] != 'alias':
+                        continue
+                    alias_key = f"{profile_rd}:{tn['number']}"
+                    cur.execute("INSERT OR REPLACE INTO subscriber_auth (key_name, key_value) VALUES (?,?)",
+                                (alias_key, entry_b_value))
+
+        # Which routing profile does this trunk's source IP use? No
+        # fallback -- a trunk with nothing explicitly assigned gets no
+        # trunk_identity_candidates row for its primary IP at all,
+        # which is the correct, diagnosable "no routing configured"
+        # state (see the unrouted_trunks warning above), not a
+        # silently-written NULL profile_id -- that NULL-row version
+        # was the actual root cause of a real bug investigated earlier
+        # this session (trunk trusted, every call 404s, nothing in any
+        # log explaining why). Already handled earlier in this same
+        # loop iteration -- the trunk_identity_candidates insert for
+        # t['ip_addr'] above already carries this same guard (only
+        # written if trunk_profile_id is not None), so no separate
+        # insert needed here -- this used to be a second, redundant
+        # source_profile write for the identical data.
+
+    # ── Gateway Groups: each member trunk ALSO gets an entry at the
+    #    group's setid, so ds_select_dst(group_setid) load-balances/
+    #    fails over across members using dispatcher's own algorithm ──
+    for m in group_members:
+        g = group_by_id.get(m['group_id'])
+        if not g:
+            continue
+        trunk_setid = trunk_setid_by_id.get(m['trunk_id'])
+        if not trunk_setid:
+            continue
+        # fetch destination URI for this trunk from what we already wrote
+        cur.execute("SELECT destination, attrs FROM dispatcher WHERE setid=?", (trunk_setid,))
+        row = cur.fetchone()
+        if row:
+            group_setid = group_setid_by_id.get(m['group_id'])
+            if not group_setid:
+                continue
+            cur.execute("INSERT INTO dispatcher (setid, destination, flags, priority, attrs, description) VALUES (?,?,0,?,?,?)",
+                        (group_setid, row[0], m['priority'] or 10, row[1], g['name'] + '-member'))
+            cur.execute("INSERT OR REPLACE INTO dispatcher_setid_alg (setid, alg) VALUES (?,?)",
+                        (group_setid, g.get('dispatch_alg') or '4'))
+            cur.execute("INSERT OR REPLACE INTO dispatcher_setid_alg_ht (key_name, key_value) VALUES (?,?)",
+                        (str(group_setid), g.get('dispatch_alg') or '4'))
+
+    # dispatcher_attrs_ht / dispatcher_dest_attrs_ht: consolidated
+    # final pass, reading from the SQLite dispatcher table itself now
+    # that both insert sites above have fully populated it -- simpler
+    # and safer than tracking per-setid "have I already written the
+    # representative row" state across two separate insert sites.
+    # Item 15 of the SQL-to-htable optimization pass.
+    cur.execute("DELETE FROM dispatcher_attrs_ht")
+    cur.execute("DELETE FROM dispatcher_dest_attrs_ht")
+    cur.execute("DELETE FROM trunk_dispatcher_attrs_ht")
+    cur.execute("SELECT setid, destination, attrs, description FROM dispatcher ORDER BY id")
+    seen_setids = set()
+    duid_pattern = re.compile(r'duid=(\d+)')
+    for row in cur.fetchall():
+        d_setid, d_destination, d_attrs, d_description = row
+        if d_setid not in seen_setids:
+            seen_setids.add(d_setid)
+            cur.execute("INSERT INTO dispatcher_attrs_ht (key_name, key_value) VALUES (?,?)",
+                        (str(d_setid), d_attrs or ''))
+        dest_key = f"{d_setid}:{d_destination}"
+        dest_value = f"{d_attrs or ''}|{d_description or ''}"
+        cur.execute("INSERT OR REPLACE INTO dispatcher_dest_attrs_ht (key_name, key_value) VALUES (?,?)",
+                    (dest_key, dest_value))
+        duid_match = duid_pattern.search(d_attrs or '')
+        if duid_match:
+            duid_value = f"{d_setid}|{d_attrs or ''}|{d_description or ''}"
+            cur.execute("INSERT OR REPLACE INTO trunk_dispatcher_attrs_ht (key_name, key_value) VALUES (?,?)",
+                        (duid_match.group(1), duid_value))
+
+    # ── Routing profiles (fallback chain + reject reason + blocklist
+    #    profile-level config, for engine_type='blocklist' profiles) ──
+    for p in profiles:
+        cur.execute("INSERT INTO routing_profiles (id, name, engine_type, fallback_profile_id, reject_code, reject_reason, "
+                     "check_order, called_blocklist_id, calling_blocklist_id, destination_type, dest_trunk_setid, "
+                     "dest_failover_setid, dest_username, dest_domain, dest_jump_profile_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (p['id'], p.get('name'), p.get('engine_type') or 'prefix', p.get('fallback_profile_id'), p.get('reject_code') or '404', p['reject_reason'],
+                     p.get('check_order'), p.get('called_blocklist_id'), p.get('calling_blocklist_id'), p.get('destination_type'),
+                     p.get('dest_trunk_setid'), p.get('dest_failover_setid'), p.get('dest_username'), p.get('dest_domain'), p.get('dest_jump_profile_id')))
+
+    # ── Media profiles (global objects -- just the ones referenced by
+    #    something on this node, fetched above) ──
+    for m in media_profiles_by_id.values():
+        cur.execute("INSERT INTO media_profiles (id, name, media_mode, codec_order, combination_policy, nat_mode, late_negotiation, dtmf_mode) VALUES (?,?,?,?,?,?,?,?)",
+                    (m['id'], m['name'], m['media_mode'], m.get('codec_order'), m['combination_policy'], m.get('nat_mode', 'auto'),
+                     1 if m.get('late_negotiation', True) else 0, m.get('dtmf_mode') or 'rfc2833'))
+        mp_value = (f"{m['media_mode'] or ''}|{m.get('codec_order') or ''}|{m['combination_policy'] or ''}|"
+                    f"{m.get('nat_mode', 'auto')}|{1 if m.get('late_negotiation', True) else 0}|"
+                    f"{m.get('dtmf_mode') or 'rfc2833'}")
+        cur.execute("INSERT INTO media_profiles_ht (key_name, key_value) VALUES (?,?)",
+                    (str(m['id']), mp_value))
+
+    # ── Rate limit pipes (pipelimit module) -- node-scoped. Each
+    #    pipe's scope resolves to a single lookup key kamailio.cfg can
+    #    query directly at the right point in the routing script:
+    #    global -> no key needed (always applies)
+    #    trunk  -> that trunk's own dispatcher setid (reuses
+    #              trunk_setid_by_id, already built above)
+    #    domain -> the domain name
+    #    user   -> "username@domain" (matches the AOR format used
+    #              elsewhere in this script for the same purpose)
+    cur.execute("DELETE FROM rate_limit_pipes")
+    pipes = fetch_all(pcur, """
+        SELECT p.id, p.name, p.scope_type, p.trunk_id, p.subscriber_id, p.algorithm, p.limit_value,
+               d.name AS domain_name, s.username AS subscriber_username, sd.name AS subscriber_domain
+        FROM platform_rate_limit_pipes p
+        LEFT JOIN platform_domains d ON d.id = p.domain_id
+        LEFT JOIN platform_subscribers s ON s.id = p.subscriber_id
+        LEFT JOIN platform_domains sd ON sd.id = s.domain_id
+        WHERE p.node_id = %s AND p.enabled = true
+    """, (node_id,))
+    for p in pipes:
+        scope_key = None
+        if p['scope_type'] == 'trunk':
+            scope_key = str(trunk_setid_by_id.get(p['trunk_id'], ''))
+        elif p['scope_type'] == 'domain':
+            scope_key = p['domain_name']
+        elif p['scope_type'] == 'user':
+            if p['subscriber_username'] and p['subscriber_domain']:
+                scope_key = f"{p['subscriber_username']}@{p['subscriber_domain']}"
+        cur.execute("INSERT INTO rate_limit_pipes (id, name, scope_type, scope_key, algorithm, limit_value, enabled) VALUES (?,?,?,?,?,?,1)",
+                    (p['id'], p['name'], p['scope_type'], scope_key, p['algorithm'], p['limit_value']))
+    domain_rate_limit_by_domain_name = {}
+    user_rate_limit_by_subscriber_id = {}
+    for p in pipes:
+        if p['scope_type'] == 'domain' and p['domain_name']:
+            domain_rate_limit_by_domain_name[p['domain_name']] = p
+        elif p['scope_type'] == 'user' and p.get('subscriber_id'):
+            user_rate_limit_by_subscriber_id[p['subscriber_id']] = p
+
+    # ── Prefix + regex rules, scoped per profile, LCR-resolved.
+    #    DIDs no longer processed separately -- platform_dids is
+    #    retired; a DID is just a prefix rule whose prefix happens to
+    #    be a full number, which naturally wins via longest-prefix at
+    #    runtime with zero special-casing needed here. ──
+    lcr_rates = fetch_all(pcur, "SELECT rte.*, rt.gateway_group_id FROM platform_rate_table_entries rte JOIN platform_rate_tables rt ON rt.id = rte.rate_table_id WHERE rte.enabled = true")
+
+    # engine_type='lcr' profiles route their rules to the real Kamailio
+    # lcr module's own tables entirely, not route_prefixes/route_regex
+    # -- excluded from prefix_rules/regex_rules below so they aren't
+    # double-processed through the wrong path.
+    lcr_profile_ids = {p['id'] for p in profiles if p.get('engine_type') == 'lcr'}
+    prefix_rules = [r for r in rules if r['match_type'] == 'prefix' and r['routing_profile_id'] not in lcr_profile_ids]
+    regex_rules = [r for r in rules if r['match_type'] == 'regex' and r['routing_profile_id'] not in lcr_profile_ids]
+    lcr_engine_rules = [r for r in rules if r['routing_profile_id'] in lcr_profile_ids]
+
+    # Group by (profile, prefix, caller_prefix, lcr_group) -- caller_
+    # prefix added to the key now that caller-specific and general
+    # rules can coexist for the same called-prefix. The schema's own
+    # uniqueness guarantee (uq_routing_rules_general /
+    # uq_routing_rules_caller_specific, both excluding LCR-grouped
+    # rows) means a non-LCR group only ever has one member; an LCR
+    # group can have several, competing on cost exactly as before.
+    groups_by_key = {}
+    for r in prefix_rules:
+        key = (r['routing_profile_id'], r['prefix'], r.get('caller_prefix'), r.get('lcr_group'))
+        groups_by_key.setdefault(key, []).append(r)
+
+    for (profile_id, prefix, caller_prefix, lcr_group), members in groups_by_key.items():
+        if lcr_group:
+            def rate_for(rule):
+                matching = [rt for rt in lcr_rates if rt['prefix'] == prefix]
+                return min((float(rt['rate_per_min']) for rt in matching), default=float('inf'))
+            ordered = sorted(members, key=lambda r: (rate_for(r), r['priority']))
+        else:
+            ordered = sorted(members, key=lambda r: r['priority'])
+
+        winner = ordered[0]
+        setid = resolve_dest_setid(winner.get('dest_trunk_id'), winner.get('dest_gateway_group_id'), trunk_setid_by_id, group_setid_by_id)
+        dest_username, dest_domain = resolve_dest_user(winner.get('dest_subscriber_id'), subscriber_by_id, domain_name_by_id)
+        failover_setid = trunk_setid_by_id.get(winner.get('failover_trunk_id')) if winner.get('failover_trunk_id') else None
+        resolved_rule_media_profile_id = resolve_rule_media_profile(
+            winner.get('media_profile_id'), winner.get('dest_trunk_id'), winner.get('dest_gateway_group_id'),
+            trunk_resolved_media_profile_by_id, group_by_id)
+        # Monitoring-only rules (trace/record tag, no real destination)
+        # are valid now -- don't skip just because setid/dest_username
+        # are both empty, only skip if there's truly nothing to do. A
+        # jump-only rule (no trunk/subscriber, just
+        # jump_to_routing_profile_id) is also valid now, same reasoning.
+        if setid or dest_username or winner.get('trace_enabled') or winner.get('record_enabled') or winner.get('jump_to_routing_profile_id'):
+            cur.execute("""INSERT INTO route_prefixes
+                (profile_id, prefix, name, friendly_name, trunk_setid, failover_setid, strip_digits, prepend_digits,
+                 caller_prefix, caller_strip_digits, caller_prepend_digits, forced_called_number, forced_calling_number, priority, trace_enabled, record_enabled,
+                 dest_username, dest_domain, media_profile_id, jump_to_routing_profile_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (profile_id, prefix, winner.get('name'), winner.get('friendly_name'), setid, failover_setid,
+                 winner['strip_digits'] or 0, winner['prepend_digits'] or '',
+                 caller_prefix, winner.get('caller_strip_digits') or 0, winner.get('caller_prepend_digits') or '',
+                 winner.get('forced_called_number') or '', winner.get('forced_calling_number') or '',
+                 winner['priority'], 1 if winner.get('trace_enabled') else 0, 1 if winner.get('record_enabled') else 0,
+                 dest_username, dest_domain, resolved_rule_media_profile_id, winner.get('jump_to_routing_profile_id')))
+
+    for r in regex_rules:
+        setid = resolve_dest_setid(r.get('dest_trunk_id'), r.get('dest_gateway_group_id'), trunk_setid_by_id, group_setid_by_id)
+        dest_username, dest_domain = resolve_dest_user(r.get('dest_subscriber_id'), subscriber_by_id, domain_name_by_id)
+        resolved_rule_media_profile_id = resolve_rule_media_profile(
+            r.get('media_profile_id'), r.get('dest_trunk_id'), r.get('dest_gateway_group_id'),
+            trunk_resolved_media_profile_by_id, group_by_id)
+        if setid or dest_username or r.get('trace_enabled') or r.get('record_enabled') or r.get('jump_to_routing_profile_id'):
+            cur.execute("""INSERT INTO route_regex
+                (profile_id, pattern, name, priority, trunk_setid, strip_digits, prepend_digits,
+                 caller_pattern, caller_strip_digits, caller_prepend_digits, trace_enabled, record_enabled,
+                 dest_username, dest_domain, media_profile_id, jump_to_routing_profile_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (r['routing_profile_id'], r['pattern'], r.get('name'), r['priority'], setid,
+                 r['strip_digits'] or 0, r['prepend_digits'] or '',
+                 r.get('caller_pattern'), r.get('caller_strip_digits') or 0, r.get('caller_prepend_digits') or '',
+                 1 if r.get('trace_enabled') else 0, 1 if r.get('record_enabled') else 0,
+                 dest_username, dest_domain, resolved_rule_media_profile_id, r.get('jump_to_routing_profile_id')))
+
+    # ── LCR engine sync -- real Kamailio lcr module tables, entirely
+    #    separate structure from route_prefixes/route_regex. lcr_id
+    #    reuses the routing_profile's own id directly (confirmed
+    #    working this session, paired with lcr_count=1000 in
+    #    kamailio.cfg.template). Gateways are deduped per unique trunk
+    #    referenced -- the same trunk used across multiple LCR rules
+    #    only gets one lcr_gw row, reused via trunk_id -> gw_id. ──
+    trunk_by_id = {t['id']: t for t in trunks}
+    transport_code_by_name = {'udp': 1, 'tcp': 2, 'tls': 3}
+
+    cur.execute("DELETE FROM lcr_rule_target")
+    cur.execute("DELETE FROM lcr_rule")
+    cur.execute("DELETE FROM lcr_gw")
+
+    gw_id_by_trunk_id = {}
+    next_gw_id = [1]
+
+    def get_or_create_gw(trunk_id, lcr_id):
+        if trunk_id in gw_id_by_trunk_id:
+            return gw_id_by_trunk_id[trunk_id]
+        trunk = trunk_by_id.get(trunk_id)
+        if not trunk:
+            return None
+        gw_id = next_gw_id[0]
+        next_gw_id[0] += 1
+        cur.execute("""INSERT INTO lcr_gw (id, lcr_id, gw_name, hostname, port, uri_scheme, transport, tag, defunct)
+                      VALUES (?,?,?,?,?,1,?,?,0)""",
+                    (gw_id, lcr_id, trunk['name'], trunk['ip_addr'], trunk['port'],
+                     transport_code_by_name.get((trunk.get('transport') or 'udp').lower(), 1), trunk['name']))
+        gw_id_by_trunk_id[trunk_id] = gw_id
+        return gw_id
+
+    lcr_rules_by_key = {}
+    for r in lcr_engine_rules:
+        if not r.get('dest_trunk_id'):
+            continue  # LCR rules without a trunk destination have nothing to route to -- skip
+        key = (r['routing_profile_id'], r['prefix'])
+        lcr_rules_by_key.setdefault(key, []).append(r)
+
+    next_rule_id = [1]
+    for (profile_id, prefix), members in lcr_rules_by_key.items():
+        rule_id = next_rule_id[0]
+        next_rule_id[0] += 1
+        cur.execute("INSERT INTO lcr_rule (id, lcr_id, prefix, stopper, enabled) VALUES (?,?,?,0,1)",
+                    (rule_id, profile_id, prefix))
+        for r in members:
+            gw_id = get_or_create_gw(r['dest_trunk_id'], profile_id)
+            if gw_id is None:
+                continue
+            cur.execute("INSERT INTO lcr_rule_target (lcr_id, rule_id, gw_id, priority, weight) VALUES (?,?,?,?,?)",
+                        (profile_id, rule_id, gw_id, r.get('priority') or 0, r.get('lcr_weight') or 1))
+
+    # ── Subscribers (registered endpoints) -- domain_id resolved to
+    #    the actual domain name string Kamailio's subscriber table needs ──
+    subscriber_identity_by_id = {}
+    for s in subscribers:
+        domain_name = domain_name_by_id.get(s['domain_id'])
+        if not domain_name:
+            continue
+        pw = s['password']
+        cur.execute("INSERT OR REPLACE INTO subscriber (username, domain, password, ha1) VALUES (?,?,?,?)",
+                    (s['username'], domain_name, pw, ha1(s['username'], domain_name, pw)))
+        cur.execute("""INSERT OR REPLACE INTO subscriber_meta (id, username, domain_name, ring_policy, max_registrations, routing_profile_id, trace_enabled, record_enabled,
+                       inbound_callerid_name, inbound_callerid_mode, inbound_callerid_custom_number, inbound_callerid_forced_number,
+                       inbound_use_pai_rpid_incoming, inbound_called_number_source,
+                       outbound_callerid_method, outbound_called_number_placement, outbound_number_uri_format, outbound_use_local_address_from, outbound_privacy_mode,
+                       topoh_mask_inbound, topoh_mask_outbound, diversion_header_enabled)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (s['id'], s['username'], domain_name, s.get('ring_policy'), s.get('max_registrations'), s.get('routing_profile_id'),
+                     1 if s.get('trace_enabled') else 0, 1 if s.get('record_enabled') else 0,
+                     s.get('inbound_callerid_name'), s.get('inbound_callerid_mode'),
+                     s.get('inbound_callerid_custom_number'), s.get('inbound_callerid_forced_number'),
+                     (1 if s.get('inbound_use_pai_rpid_incoming') else 0) if s.get('inbound_use_pai_rpid_incoming') is not None else None,
+                     s.get('inbound_called_number_source'),
+                     s.get('outbound_callerid_method'), s.get('outbound_called_number_placement'),
+                     s.get('outbound_number_uri_format'),
+                     (1 if s.get('outbound_use_local_address_from') else 0) if s.get('outbound_use_local_address_from') is not None else None,
+                     s.get('outbound_privacy_mode'),
+                     (1 if s.get('topoh_mask_inbound') else 0) if s.get('topoh_mask_inbound') is not None else None,
+                     (1 if s.get('topoh_mask_outbound') else 0) if s.get('topoh_mask_outbound') is not None else None,
+                     (1 if s.get('diversion_header_enabled') else 0) if s.get('diversion_header_enabled') is not None else None))
+        subscriber_identity_by_id[s['id']] = (s['username'], domain_name)
+
+    # Backs the subscriber_lookup routing engine (htable module) --
+    # key_name/key_value are htable's own default column names.
+    # key_type/value_type=0 means "string" (htable's own type codes),
+    # expires=0 means "never expires" (this is reference data, not a
+    # cache with TTL semantics). A number whose subscriber's domain
+    # isn't local to this node (or the subscriber got filtered out
+    # above) is silently skipped -- same "only sync what's actually
+    # usable on this node" principle as everywhere else here.
+    cur.execute("DELETE FROM subscriber_numbers")
+    for n in subscriber_numbers:
+        identity = subscriber_identity_by_id.get(n['subscriber_id'])
+        if not identity:
+            continue
+        username, domain_name = identity
+        cur.execute("INSERT INTO subscriber_numbers (key_name, key_type, value_type, key_value, expires) VALUES (?,0,0,?,0)",
+                    (n['number'], f"{username}@{domain_name}|{n.get('number_type') or 'did'}"))
+
+    # A trunk's own allowed-caller-ID pool -- backs the allow_dids_
+    # only/force_per_number enforcement check in kamailio.cfg.template.
+    # Same shape as subscriber_numbers just above; value carries
+    # trunk_id|number_type rather than username@domain|number_type
+    # since there's no "identity" to resolve here, just membership.
+    cur.execute("DELETE FROM trunk_numbers")
+    for n in trunk_numbers:
+        cur.execute("INSERT INTO trunk_numbers (key_name, key_type, value_type, key_value, expires) VALUES (?,0,0,?,0)",
+                    (n['number'], f"{n['trunk_id']}|{n.get('number_type') or 'did'}"))
+
+    # Per-subscriber call forwarding -- target_subscriber_id resolves
+    # to target_username/target_domain via the same identity lookup
+    # just built above; target_external_number passes through as-is.
+    # A config whose owning subscriber isn't local to this node, or
+    # whose target subscriber isn't either, is silently skipped -- the
+    # target_subscriber_id case specifically: forwarding to a
+    # subscriber this node doesn't know about would be a dangling
+    # reference at call time, so it's better skipped here than synced
+    # as broken data.
+    cur.execute("DELETE FROM subscriber_forwarding")
+    subscriber_forwarding_by_key = {}
+    for fwd in subscriber_forwarding:
+        identity = subscriber_identity_by_id.get(fwd['subscriber_id'])
+        if not identity:
+            continue
+        username, domain_name = identity
+        target_username, target_domain = None, None
+        if fwd.get('target_subscriber_id'):
+            target_identity = subscriber_identity_by_id.get(fwd['target_subscriber_id'])
+            if not target_identity:
+                continue
+            target_username, target_domain = target_identity
+        cur.execute("""INSERT INTO subscriber_forwarding
+            (subscriber_id, username, domain_name, forward_type, enabled, target_username, target_domain, target_external_number, mode)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
+            (fwd['subscriber_id'], username, domain_name, fwd['forward_type'], 1 if fwd.get('enabled') else 0,
+             target_username, target_domain, fwd.get('target_external_number'), fwd.get('mode') or 'reroute'))
+        subscriber_forwarding_by_key[(username, domain_name, fwd['forward_type'])] = {
+            'enabled': 1 if fwd.get('enabled') else 0,
+            'target_username': target_username or '',
+            'target_domain': target_domain or '',
+            'target_external_number': fwd.get('target_external_number') or '',
+            'mode': fwd.get('mode') or 'reroute',
+        }
+
+    # ── Domain REGISTER-acceptance check: which domains does each of
+    #    THIS node's SIP Profile listeners accept, and what reject
+    #    reason to use for a domain that's recognized but not enabled
+    #    here (vs the node-level fallback for a genuinely unknown domain) ──
+    cur.execute("DELETE FROM sip_profile_domains")
+    cur.execute("DELETE FROM sip_profile_domains_ht")
+    cur.execute("DELETE FROM domain_reject_info")
+    profile_domain_links = fetch_all(pcur, """
+        SELECT spd.sip_profile_id, spd.domain_id, spd.routing_profile_id AS override_profile_id,
+               spd.media_profile_id AS override_media_profile_id, d.name AS domain_name
+        FROM platform_sip_profile_domains spd
+        JOIN platform_domains d ON d.id = spd.domain_id
+        WHERE spd.sip_profile_id IN %s
+    """, (sip_profile_ids,))
+    for link in profile_domain_links:
+        # Resolution: junction's own override, else that SIP Profile's
+        # mandatory-in-the-UI default. Resolved here at sync time --
+        # kamailio.cfg just reads one already-resolved value.
+        resolved_profile_id = link['override_profile_id'] or sip_profile_default_profile.get(link['sip_profile_id'])
+        # Same resolution shape for the inbound-leg media profile.
+        resolved_media_profile_id = link['override_media_profile_id'] or sip_profile_default_media_profile.get(link['sip_profile_id'])
+        custom_hdrs_list = domain_custom_headers_by_id.get(link['domain_id'], [])
+        custom_hdrs_encoded = "|".join(base64.b64encode(h.encode()).decode() for h in custom_hdrs_list) if custom_hdrs_list else None
+        strip_hdrs_list = domain_strip_headers_by_id.get(link['domain_id'], [])
+        strip_hdrs_encoded = "|".join(strip_hdrs_list) if strip_hdrs_list else None
+        cur.execute("INSERT INTO sip_profile_domains (sip_profile_id, domain_name, routing_profile_id, media_profile_id, custom_hdrs, strip_hdrs) VALUES (?,?,?,?,?,?)",
+                    (link['sip_profile_id'], link['domain_name'], resolved_profile_id, resolved_media_profile_id, custom_hdrs_encoded, strip_hdrs_encoded))
+        cur.execute("INSERT INTO sip_profile_domains_ht (key_name, key_value) VALUES (?,?)",
+                    (f"{link['sip_profile_id']}:{link['domain_name']}", f"{resolved_profile_id or ''}|{resolved_media_profile_id or ''}"))
+    for d in domains:
+        cur.execute("INSERT INTO domain_reject_info (domain_name, reject_code, reject_text) VALUES (?,?,?)",
+                    (d['name'], d['reject_reason_code'], d['reject_reason_text']))
+        # NULL (not set on the domain) resolves to the sensible
+        # default (masking enabled) -- see this INSERT's comment above
+        # for why this doesn't chain through a specific SIP Profile.
+        _domain_topoh_in = d.get('topoh_mask_inbound')
+        _domain_topoh_out = d.get('topoh_mask_outbound')
+        cur.execute("""INSERT INTO domain_settings (domain_name, domain_id, domain_type, ring_policy, max_registrations, outbound_auth_required, user_unreachable_code, user_unreachable_text,
+                       unconditional_forwarding_enabled, busy_forwarding_enabled, no_answer_forwarding_enabled, unavailable_forwarding_enabled,
+                       inbound_callerid_name, inbound_callerid_mode, inbound_callerid_custom_number, inbound_callerid_forced_number,
+                       inbound_use_pai_rpid_incoming, inbound_called_number_source,
+                       outbound_callerid_method, outbound_called_number_placement, outbound_number_uri_format, outbound_use_local_address_from, outbound_privacy_mode,
+                       topoh_mask_inbound, topoh_mask_outbound, diversion_header_enabled, custom_hdrs, strip_hdrs)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (d['name'], d['id'], d['domain_type'], d['ring_policy'], d['max_registrations'],
+                     1 if d['outbound_auth_required'] else 0, d['user_unreachable_code'], d['user_unreachable_text'],
+                     1 if d.get('unconditional_forwarding_enabled') else 0, 1 if d.get('busy_forwarding_enabled') else 0,
+                     1 if d.get('no_answer_forwarding_enabled') else 0, 1 if d.get('unavailable_forwarding_enabled') else 0,
+                     d.get('inbound_callerid_name') or '', d.get('inbound_callerid_mode') or 'allow_any',
+                     d.get('inbound_callerid_custom_number') or '', d.get('inbound_callerid_forced_number') or '',
+                     1 if d.get('inbound_use_pai_rpid_incoming') else 0, d.get('inbound_called_number_source') or 'request_uri',
+                     d.get('outbound_callerid_method') or 'from_header', d.get('outbound_called_number_placement') or 'request_uri',
+                     d.get('outbound_number_uri_format') or 'sip_uri', 1 if d.get('outbound_use_local_address_from') else 0,
+                     d.get('outbound_privacy_mode') or 'none',
+                     1 if (_domain_topoh_in is None or _domain_topoh_in) else 0,
+                     1 if (_domain_topoh_out is None or _domain_topoh_out) else 0,
+                     1 if d.get('diversion_header_enabled') else 0,
+                     ("|".join(base64.b64encode(h.encode()).decode() for h in domain_custom_headers_by_id.get(d['id'], [])) or None),
+                     ("|".join(domain_strip_headers_by_id.get(d['id'], [])) or None)))
+
+    # ── ACL CIDR entries -- reuse the `address` table (already used
+    #    for trunk source ACLs at grp=1) so Kamailio's own
+    #    allow_address() does the CIDR matching. Two groups per
+    #    domain now, not one: grp = 10000 + domain_id for 'allow'
+    #    entries, grp = 20000 + domain_id for 'deny' -- kamailio.cfg's
+    #    REGISTER check tests the deny group FIRST and rejects
+    #    outright on any match, before ever consulting the allow
+    #    group, so a deny always wins regardless of matching allow
+    #    entries. CIDR strings (e.g. '203.0.113.0/24') are split into
+    #    ip/mask for the address table's own columns; a bare host is
+    #    treated as /32 -- works the same for IPv6 CIDRs, since this
+    #    is just a string split on '/', not IPv4-specific.
+    domain_acl_entries = {}
+    for link in domain_acls_map:
+        domain_acl_entries.setdefault(link['domain_id'], []).append(link['acl_id'])
+    for d in domains:
+        for acl_id in domain_acl_entries.get(d['id'], []):
+            for e in entries_by_acl.get(acl_id, []):
+                cidr = e['cidr']
+                grp_base = 20000 if e.get('action') == 'deny' else 10000
+                expanded_ips = expand_acl_cidr_to_ips(cidr)
+                if expanded_ips is None:
+                    print(f"WARN: domain {d.get('name')!r} ACL entry {cidr!r} could not be expanded "
+                          f"for the address table (unparseable or exceeds the expansion limit) -- "
+                          f"skipped entirely.", file=sys.stderr)
+                else:
+                    for ip in expanded_ips:
+                        cur.execute("INSERT INTO address (grp, ip_addr, mask, port, tag) VALUES (?,?,32,0,?)",
+                                    (grp_base + d['id'], ip, e.get('description') or ''))
+
+    # has_deny/has_allow per domain -- computed once here, from the
+    # same entries_by_acl data just written to the address table
+    # above, so subscriber_auth's htable value can carry these flags
+    # directly instead of route[REGISTER] needing a live SQL
+    # COUNT(*) per REGISTER just to answer "is there any restriction
+    # configured at all" (the opt-in-restriction design). Only the
+    # existence check moves here -- the actual CIDR match still goes
+    # through Kamailio's own allow_address() against the address
+    # table synced above, not reimplemented.
+    domain_acl_flags = {}
+    for d in domains:
+        has_deny = False
+        has_allow = False
+        for acl_id in domain_acl_entries.get(d['id'], []):
+            for e in entries_by_acl.get(acl_id, []):
+                if e.get('action') == 'deny':
+                    has_deny = True
+                else:
+                    has_allow = True
+        domain_acl_flags[d['id']] = (has_deny, has_allow)
+
+    # sip_listeners: maps this node's own listener sockets to their
+    # SIP Profile, so kamailio.cfg can determine which profile
+    # received a given REGISTER (via $Ri:$Rp pseudo-variables) and
+    # check sip_profile_domains against it. ip_addr/port now live on
+    # the profile itself (one fixed address per profile, transports
+    # are just enable/disable toggles against that same address) --
+    # pulled directly from platform_sip_profiles rather than joining
+    # through platform_sip_listeners, since a profile with multiple
+    # enabled transports would otherwise produce duplicate rows here
+    # (same ip:port repeated once per transport) for what is really
+    # just one socket-to-profile mapping.
+    cur.execute("DELETE FROM sip_listeners")
+    cur.execute("DELETE FROM sip_listeners_ht")
+    listener_profiles = fetch_all(pcur, """
+        SELECT id AS sip_profile_id, ip_addr, port
+        FROM platform_sip_profiles WHERE id IN %s
+    """, (sip_profile_ids,))
+    for l in listener_profiles:
+        cur.execute("INSERT INTO sip_listeners (ip_addr, port, sip_profile_id) VALUES (?,?,?)",
+                    (l['ip_addr'], l['port'], l['sip_profile_id']))
+        cur.execute("INSERT INTO sip_listeners_ht (key_name, key_value) VALUES (?,?)",
+                    (f"{l['ip_addr']}:{l['port']}", str(l['sip_profile_id'])))
+
+    # listener_settings htable: ip:port -> this listener's own SIP
+    # Profile's unbound_domain reject settings. Backs route[REGISTER]'s
+    # miss-path -- see the table's own comment in node-install.sh for
+    # the full design (one row per listener, not per subscriber, so
+    # this stays tiny regardless of subscriber count).
+    # security_flags cascade (Tiers 1-3 of the finalized design:
+    # catalog default -> per-node override -> per-SIP-Profile
+    # override) -- resolved once here per SIP Profile, same
+    # COALESCE-at-sync-time pattern used throughout this design,
+    # rather than at call time. Currently backs
+    # silent_drop_unmatched_dialog only; the virtual 'security_flags'
+    # module is deliberately generic so future flags of the same
+    # shape (node/profile-overridable booleans, never real Kamailio
+    # config directives) can be added here without a new mechanism.
+    sec_flag_catalog = fetch_all(pcur, "SELECT id, param_name, default_value FROM platform_modparam_catalog WHERE module = 'security_flags'")
+    sec_flag_node_overrides = fetch_all(pcur, "SELECT modparam_catalog_id, value FROM platform_node_modparams WHERE node_id = %s", (node_id,))
+    sec_flag_node_override_by_catalog_id = {r['modparam_catalog_id']: r['value'] for r in sec_flag_node_overrides}
+    sec_flag_profile_overrides = fetch_all(pcur, "SELECT sip_profile_id, modparam_catalog_id, value FROM platform_sip_profile_modparams WHERE sip_profile_id IN %s", (sip_profile_ids,))
+    sec_flag_profile_override_by_key = {(r['sip_profile_id'], r['modparam_catalog_id']): r['value'] for r in sec_flag_profile_overrides}
+
+    def resolve_silent_drop(sip_profile_id):
+        for c in sec_flag_catalog:
+            if c['param_name'] != 'silent_drop_unmatched_dialog':
+                continue
+            profile_val = sec_flag_profile_override_by_key.get((sip_profile_id, c['id']))
+            if profile_val is not None:
+                return profile_val
+            node_val = sec_flag_node_override_by_catalog_id.get(c['id'])
+            if node_val is not None:
+                return node_val
+            return c['default_value']
+        return 'on'  # catalog row missing entirely -- fail toward the safer (silent) default
+
+    sip_profiles_by_id = {p['id']: p for p in sip_profiles}
+    cur.execute("DELETE FROM listener_settings")
+    for l in listener_profiles:
+        profile = sip_profiles_by_id.get(l['sip_profile_id'])
+        if not profile:
+            continue
+        key = f"{l['ip_addr']}:{l['port']}"
+        silent_drop = resolve_silent_drop(l['sip_profile_id'])
+        silent_drop_bit = '1' if str(silent_drop).strip().lower() in ('1', 'on', 'yes', 'true') else '0'
+        value = f"{profile.get('unbound_domain_action') or 'reject'}|{profile.get('unbound_domain_code') or 404}|{profile.get('unbound_domain_text') or 'Domain is not bound to this profile'}|{silent_drop_bit}"
+        cur.execute("INSERT OR REPLACE INTO listener_settings (key_name, key_value) VALUES (?,?)", (key, value))
+
+    # response_reasons htable: semantic rejection key -> effective
+    # reason text (catalog default, overridden per-node via the same
+    # platform_node_modparams mechanism already proven for every other
+    # modparam catalog entry). Static per node, so preloaded once here
+    # rather than queried per-rejection at call time.
+    response_reason_rows = fetch_all(pcur, """
+        SELECT c.param_name, COALESCE(nm.value, c.default_value) AS effective_value
+        FROM platform_modparam_catalog c
+        LEFT JOIN platform_node_modparams nm ON nm.modparam_catalog_id = c.id AND nm.node_id = %s
+        WHERE c.module = 'response_reasons'
+    """, (node_id,))
+    cur.execute("DELETE FROM response_reasons")
+    for r in response_reason_rows:
+        cur.execute("INSERT OR REPLACE INTO response_reasons (key_name, key_value) VALUES (?,?)", (r['param_name'], r['effective_value']))
+
+    # subscriber_auth htable: ip:port:username@domain -> type=subscriber|
+    # ha1|domain_id|has_deny|has_allow|outbound_auth_required|
+    # topoh_mask_inbound. Backs route[REGISTER]'s fast path -- see the
+    # table's own comment in node-install.sh for the full design and
+    # this session's live-measured performance numbers (57,956 req/sec
+    # vs 22,830 for the equivalent chained SQLite queries). One row
+    # per (listener, subscriber) combination -- a domain bound to
+    # multiple SIP Profiles on this node means multiple rows per
+    # subscriber, one per listener that domain is actually reachable
+    # on, matching exactly what a REGISTER arriving on any of those
+    # listeners needs to look up.
+    #
+    # type=subscriber prefix added per the finalized design's unified
+    # identity table -- explicit over inferred (checked directly
+    # rather than guessed from key shape), same table also carries
+    # type=trunk_realm entries elsewhere.
+    #
+    # SECOND, listener-agnostic key (username@domain alone, no ip:port
+    # prefix -- this data has no listener/network context at all,
+    # purely "give me this subscriber's routing/caller-ID config") ->
+    # routing_profile_id|engine_type|inbound_callerid_name|
+    # inbound_callerid_mode|inbound_callerid_custom_number|
+    # inbound_callerid_forced_number|inbound_use_pai_rpid_incoming|
+    # inbound_called_number_source|topoh_mask_inbound. Replaces
+    # route[LOOKUP_PROFILE]'s 8-column LEFT JOIN query (confirmed the
+    # single most expensive, most frequently-hit query in the whole
+    # subscriber-call path) plus the repeated destination-side
+    # domain_settings/subscriber_meta diversion-header lookups
+    # elsewhere in kamailio.cfg.template. Per-subscriber fields fall
+    # back to the domain's own default via `or` when unset -- the
+    # exact same COALESCE(subscriber_meta, domain_settings) semantics
+    # the original SQL query used, just resolved here at sync time
+    # instead of live per-call.
+    domain_id_to_listeners = {}
+    for link in profile_domain_links:
+        for l in listener_profiles:
+            if l['sip_profile_id'] == link['sip_profile_id']:
+                domain_id_to_listeners.setdefault(link['domain_id'], []).append((l['ip_addr'], l['port']))
+    domain_by_id = {d['id']: d for d in domains}
+    profile_engine_type_by_id = {p['id']: p['engine_type'] for p in profiles}
+    profile_by_id = {p['id']: p for p in profiles}
+    cur.execute("DELETE FROM routing_profile_meta")
+    for p in profiles:
+        bridge_segment = encode_bridge_segment(p) if p.get('engine_type') == 'bridge' else ''
+        meta_value = (f"{p.get('engine_type') or ''}|{p.get('name') or ''}|"
+                      f"{p.get('fallback_profile_id') or ''}|"
+                      f"{p.get('reject_code') or '404'}|{p.get('reject_reason') or 'No Route Found'}|"
+                      f"{p.get('check_order') or ''}|{p.get('called_blocklist_id') or ''}|"
+                      f"{p.get('calling_blocklist_id') or ''}|{p.get('destination_type') or ''}|"
+                      f"{p.get('dest_trunk_setid') or ''}|{p.get('dest_failover_setid') or ''}|"
+                      f"{p.get('dest_username') or ''}|{p.get('dest_domain') or ''}|"
+                      f"{p.get('dest_jump_profile_id') or ''}|{bridge_segment}")
+        cur.execute("INSERT INTO routing_profile_meta (key_name, key_value) VALUES (?,?)",
+                    (str(p['id']), meta_value))
+    cur.execute("DELETE FROM subscriber_auth")
+    cur.execute("DELETE FROM subscriber_forwarding_meta_ht")
+    cur.execute("DELETE FROM subscriber_outbound_meta_ht")
+    for s in subscribers:
+        domain_name = domain_name_by_id.get(s['domain_id'])
+        if not domain_name:
+            continue
+        d = domain_by_id.get(s['domain_id'], {})
+        pw = s['password']
+        subscriber_ha1 = ha1(s['username'], domain_name, pw)
+        has_deny, has_allow = domain_acl_flags.get(s['domain_id'], (False, False))
+        outbound_auth_required = (1 if s.get('outbound_auth_required') else 0) if s.get('outbound_auth_required') is not None \
+            else (1 if d.get('outbound_auth_required') else 0)
+        topoh_mask_inbound_trust = (1 if s.get('topoh_mask_inbound') else 0) if s.get('topoh_mask_inbound') is not None \
+            else (1 if d.get('topoh_mask_inbound') else 0)
+        # Trust CIDR 1/2 -- explicitly excludes the unset 0.0.0.0/0
+        # default (empty field here, not the literal default value):
+        # a subscriber with no real restriction configured must fall
+        # through to location/ACL-only trust, not silently pass for
+        # literally any source. Bare fields, safe now that the
+        # parsing bug for this entry's other bare-value fields
+        # (domain_id/outbound_auth_required/topoh_mask_inbound) is
+        # fixed.
+        trust_cidr_1 = s.get('inbound_trust_cidr_1') or ''
+        if trust_cidr_1 == '0.0.0.0/0':
+            trust_cidr_1 = ''
+        trust_cidr_2 = s.get('inbound_trust_cidr_2') or ''
+        if trust_cidr_2 == '0.0.0.0/0':
+            trust_cidr_2 = ''
+        trust_value = (f"type=subscriber|{subscriber_ha1}|{s['domain_id']}|{1 if has_deny else 0}|"
+                       f"{1 if has_allow else 0}|{outbound_auth_required}|{topoh_mask_inbound_trust}|"
+                       f"{s['id']}|{trust_cidr_1}|{trust_cidr_2}")
+        for ip_addr, port in domain_id_to_listeners.get(s['domain_id'], []):
+            key = f"{ip_addr}:{port}:{s['username']}@{domain_name}"
+            cur.execute("INSERT OR REPLACE INTO subscriber_auth (key_name, key_value) VALUES (?,?)", (key, trust_value))
+            # Alias projection -- only 'alias'-type numbers are
+            # identity claims (From-header qualification); did/ext/
+            # sms/wa/cust are destination-side routing data only, per
+            # the agreed design's hard identity-vs-routing separation,
+            # and must never resolve identity even though they share
+            # this same source table.
+            for sn in subscriber_numbers_by_subscriber_id.get(s['id'], []):
+                if sn['number_type'] != 'alias':
+                    continue
+                alias_key = f"{ip_addr}:{port}:{sn['number']}@{domain_name}"
+                cur.execute("INSERT OR REPLACE INTO subscriber_auth (key_name, key_value) VALUES (?,?)", (alias_key, trust_value))
+
+        # Subscriber ACL allow entries -- same treatment as trunk/
+        # domain ACLs: expanded to individual /32 IPs into the
+        # permissions module's own address table (never stored with
+        # the entry's own wider mask, never embedded as CIDR text
+        # anywhere). grp = 30000 + subscriber id, checked via allow_
+        # address() at INVITE time, mirroring the domain ACL block's
+        # exact pattern (grp = 10000/20000 + domain_id) just below.
+        # Deny entries have no effect here, same documented convention
+        # as trunk ACLs -- this is purely an additive trust grant, not
+        # a blocklist. Expanded into individual /32 IPs via the same
+        # shared helper trunk/domain
+        # ACLs use, not stored with the entry's own wider mask -- ACL
+        # entries are capped at /28 specifically so this expansion
+        # stays cheap and bounded, matching the same approach already
+        # used for trunk identity (trunk_ip_identity).
+        for acl_id in subscriber_acl_entries.get(s['id'], []):
+            for entry in entries_by_acl.get(acl_id, []):
+                if entry.get('action') != 'allow' or not entry.get('cidr'):
+                    continue
+                cidr = entry['cidr']
+                expanded_ips = expand_acl_cidr_to_ips(cidr)
+                if expanded_ips is None:
+                    print(f"WARN: subscriber {s.get('username')!r} ACL entry {cidr!r} could not be "
+                          f"expanded for the address table (unparseable or exceeds the expansion "
+                          f"limit) -- skipped entirely.", file=sys.stderr)
+                else:
+                    for ip in expanded_ips:
+                        cur.execute("INSERT INTO address (grp, ip_addr, mask, port, tag) VALUES (?,?,32,0,?)",
+                                    (30000 + s['id'], ip, entry.get('description') or ''))
+
+        routing_profile_id = s.get('routing_profile_id')
+        engine_type = profile_engine_type_by_id.get(routing_profile_id, 'prefix') if routing_profile_id else ''
+        callerid_name = s.get('inbound_callerid_name') or d.get('inbound_callerid_name') or ''
+        callerid_mode = s.get('inbound_callerid_mode') or d.get('inbound_callerid_mode') or 'allow_any'
+        callerid_custom = s.get('inbound_callerid_custom_number') or d.get('inbound_callerid_custom_number') or ''
+        callerid_forced = s.get('inbound_callerid_forced_number') or d.get('inbound_callerid_forced_number') or ''
+        use_pai_rpid = s.get('inbound_use_pai_rpid_incoming')
+        if use_pai_rpid is None:
+            use_pai_rpid = d.get('inbound_use_pai_rpid_incoming')
+        called_number_source = s.get('inbound_called_number_source') or d.get('inbound_called_number_source') or 'request_uri'
+        routing_key = f"{s['username']}@{domain_name}"
+        # user/domain rate-limit fields -- folded in here rather than
+        # a separate SQL query at call time (item 15 of the SQL-to-
+        # htable optimization pass). Empty string when no matching
+        # pipe is configured for that scope, same "no pipe = no
+        # limit, opt-in" contract every scope already has.
+        user_rl = user_rate_limit_by_subscriber_id.get(s['id'])
+        domain_rl = domain_rate_limit_by_domain_name.get(domain_name)
+        user_rl_name = user_rl['name'] if user_rl else ''
+        user_rl_algo = user_rl['algorithm'] if user_rl else ''
+        user_rl_limit = str(user_rl['limit_value']) if user_rl else ''
+        domain_rl_name = domain_rl['name'] if domain_rl else ''
+        domain_rl_algo = domain_rl['algorithm'] if domain_rl else ''
+        domain_rl_limit = str(domain_rl['limit_value']) if domain_rl else ''
+        routing_value = (f"{routing_profile_id or ''}|{engine_type}|{callerid_name}|{callerid_mode}|"
+                          f"{callerid_custom}|{callerid_forced}|{1 if use_pai_rpid else 0}|"
+                          f"{called_number_source}|{topoh_mask_inbound_trust}|"
+                          f"{user_rl_name}|{user_rl_algo}|{user_rl_limit}|"
+                          f"{domain_rl_name}|{domain_rl_algo}|{domain_rl_limit}")
+        if engine_type == 'bridge':
+            bridge_profile = profile_by_id.get(routing_profile_id, {})
+            bridge_segment = encode_bridge_segment(bridge_profile)
+            if bridge_segment:
+                routing_value += f"|{bridge_segment}"
+        cur.execute("INSERT OR REPLACE INTO subscriber_auth (key_name, key_value) VALUES (?,?)", (routing_key, routing_value))
+
+        # subscriber_forwarding_meta_ht: the forwarding cluster --
+        # item 15 of the SQL-to-htable optimization pass, the largest
+        # remaining piece. 26 fields, written as its own separate
+        # table (not folded into subscriber_auth's own value) given
+        # the field count here.
+        def _fwd_fields(forward_type):
+            fwd = subscriber_forwarding_by_key.get((s['username'], domain_name, forward_type))
+            if not fwd:
+                return "0||||reroute"
+            return (f"{fwd['enabled']}|{fwd['target_username']}|{fwd['target_domain']}|"
+                    f"{fwd['target_external_number']}|{fwd['mode']}")
+        uncond_gate = 1 if d.get('unconditional_forwarding_enabled') else 0
+        unavail_gate = 1 if d.get('unavailable_forwarding_enabled') else 0
+        busy_gate = 1 if d.get('busy_forwarding_enabled') else 0
+        diversion_enabled = s.get('diversion_header_enabled')
+        if diversion_enabled is None:
+            diversion_enabled = d.get('diversion_header_enabled', True)
+        user_unreachable_code = d.get('user_unreachable_code') or 480
+        user_unreachable_text = d.get('user_unreachable_text') or 'Temporarily Unavailable'
+        fwd_meta_value = (f"{uncond_gate}|{_fwd_fields('unconditional')}|"
+                           f"{unavail_gate}|{_fwd_fields('unavailable')}|"
+                           f"{busy_gate}|{_fwd_fields('busy')}|"
+                           f"{_fwd_fields('no_answer')}|"
+                           f"{1 if diversion_enabled else 0}|"
+                           f"{user_unreachable_code}|{user_unreachable_text}")
+        cur.execute("INSERT OR REPLACE INTO subscriber_forwarding_meta_ht (key_name, key_value) VALUES (?,?)",
+                    (routing_key, fwd_meta_value))
+
+        # subscriber_outbound_meta_ht: the deferred "rp" query --
+        # item 15's last significant remaining piece. 16 fields,
+        # semicolon-separated at the outer level (not pipe) since
+        # fields 14-15 are themselves pipe-delimited header lists.
+        # Override semantics matched exactly to the original SQL:
+        # field 0 and fields 5-13 use subscriber-override-else-
+        # domain-default (COALESCE in the original); fields 1-2 are
+        # subscriber-only, no domain fallback at all (the original
+        # read sm.trace_enabled/sm.record_enabled directly, no
+        # COALESCE); fields 3-4 and 14-15 are domain-only (the
+        # original read ds.* directly).
+        ob_ring_policy = s.get('ring_policy') or d.get('ring_policy', 'all')
+        ob_trace = 1 if s.get('trace_enabled') else 0
+        ob_record = 1 if s.get('record_enabled') else 0
+        ob_domain_id = d['id']
+        ob_no_answer_gate = 1 if d.get('no_answer_forwarding_enabled') else 0
+        def _ob_override(field):
+            v = s.get(field)
+            return v if v is not None else d.get(field)
+        ob_cid_method = _ob_override('outbound_callerid_method') or 'from_header'
+        ob_called_placement = _ob_override('outbound_called_number_placement') or 'request_uri'
+        ob_uri_format = _ob_override('outbound_number_uri_format') or 'sip_uri'
+        ob_local_addr_from = 1 if _ob_override('outbound_use_local_address_from') else 0
+        ob_privacy = _ob_override('outbound_privacy_mode') or 'none'
+        ob_topoh_out = 1 if _ob_override('topoh_mask_outbound') is not False else 0
+        ob_cid_mode = _ob_override('outbound_callerid_mode') or 'allow_any'
+        ob_cid_custom = _ob_override('outbound_callerid_custom_number') or ''
+        ob_cid_forced = _ob_override('outbound_callerid_forced_number') or ''
+        ob_custom_hdrs_list = domain_custom_headers_by_id.get(d['id'], [])
+        ob_custom_hdrs = "|".join(base64.b64encode(h.encode()).decode() for h in ob_custom_hdrs_list)
+        ob_strip_hdrs_list = domain_strip_headers_by_id.get(d['id'], [])
+        ob_strip_hdrs = "|".join(ob_strip_hdrs_list)
+        # R-URI/To header construction -- domain-only, no subscriber
+        # override exists for these (confirmed via schema). Previously
+        # entirely absent from this htable -- these settings, visible
+        # and editable in the UI, were never actually wired into the
+        # local_subscriber routing path at all.
+        ob_ruri_user_src = d.get('outbound_ruri_user_source') or 'dialed_number'
+        ob_ruri_dom_src = d.get('outbound_ruri_domain_source') or 'node_address'
+        ob_ruri_fmt = d.get('outbound_ruri_uri_format') or 'sip_uri'
+        ob_to_same = 1 if d.get('outbound_to_same_as_ruri') is not False else 0
+        ob_to_user_src = d.get('outbound_to_user_source') or 'dialed_number'
+        ob_to_dom_src = d.get('outbound_to_domain_source') or 'node_address'
+        ob_to_fmt = d.get('outbound_to_uri_format') or 'sip_uri'
+        outbound_meta_value = (f"{ob_ring_policy};{ob_trace};{ob_record};{ob_domain_id};{ob_no_answer_gate};"
+                                f"{ob_cid_method};{ob_called_placement};{ob_uri_format};{ob_local_addr_from};"
+                                f"{ob_privacy};{ob_topoh_out};{ob_cid_mode};{ob_cid_custom};{ob_cid_forced};"
+                                f"{ob_custom_hdrs};{ob_strip_hdrs};{ob_ruri_user_src};{ob_ruri_dom_src};"
+                                f"{ob_ruri_fmt};{ob_to_same};{ob_to_user_src};{ob_to_dom_src};{ob_to_fmt}")
+        cur.execute("INSERT OR REPLACE INTO subscriber_outbound_meta_ht (key_name, key_value) VALUES (?,?)",
+                    (routing_key, outbound_meta_value))
+
+    # firewall_allowlist: port-scoped, tagged per-entity firewall allow
+    # entries -- the port-scoping and per-rule comment half of ACL-
+    # derived exemption. Deliberately separate from the address table:
+    # address.port means "source port to match" for the permissions-
+    # module trust checks (0 = any source port), this table's port
+    # means "destination SIP Profile port to allow through on" -- a
+    # different concept that would have silently conflicted if forced
+    # into the same column. tag is the human-readable "why is this IP
+    # allowed" string a node-local script renders as an iptables
+    # comment.
+    #
+    # Reads raw ACL CIDRs and Trust CIDRs directly, NOT expanded per-IP
+    # -- unlike the address table (which needs exact-match IPs for its
+    # permissions-module/ipset consumers), iptables -s accepts CIDR
+    # notation natively. One row per ACL/Trust-CIDR entry, not up to 16
+    # expanded rows per entry -- simpler, and the generated rule shows
+    # the admin's actual configured CIDR directly in iptables -nL
+    # rather than an opaque list of individual addresses.
+    cur.execute("DELETE FROM firewall_allowlist")
+    sip_profile_name_by_id = {p['id']: p['name'] for p in sip_profiles}
+
+    def _add_allowlist_entries(cidr_or_ip, port, tag):
+        if cidr_or_ip and port:
+            cur.execute("INSERT INTO firewall_allowlist (ip_addr, port, protocol, tag) VALUES (?,?,?,?)",
+                        (cidr_or_ip, port, 'both', tag))
+
+    for t in trunks:
+        if not t['enabled']:
+            continue
+        profile_addr = sip_profile_addr_by_id.get(t['sip_profile_id'])
+        if not profile_addr:
+            continue
+        profile_ip, profile_port = profile_addr
+        profile_name = sip_profile_name_by_id.get(t['sip_profile_id'], '?')
+        tag = f"SIP Profile: {profile_name}, {profile_ip}:{profile_port}, Trunk: {t['name']}"
+        _add_allowlist_entries(t['ip_addr'], profile_port, tag)
+        for acl_id in trunk_acl_entries.get(t['id'], []):
+            for e in entries_by_acl.get(acl_id, []):
+                if e.get('action') == 'deny' or not e.get('cidr'):
+                    continue
+                _add_allowlist_entries(e['cidr'], profile_port, tag)
+        for cidr in (t.get('inbound_trust_cidr_1'), t.get('inbound_trust_cidr_2')):
+            if cidr and cidr != '0.0.0.0/0':
+                _add_allowlist_entries(cidr, profile_port, tag)
+
+    for d in domains:
+        for acl_id in domain_acl_entries.get(d['id'], []):
+            for e in entries_by_acl.get(acl_id, []):
+                if e.get('action') != 'allow' or not e.get('cidr'):
+                    continue
+                for ip_addr, port in domain_id_to_listeners.get(d['id'], []):
+                    profile_id = next((pid for pid, addr in sip_profile_addr_by_id.items() if addr == (ip_addr, port)), None)
+                    profile_name = sip_profile_name_by_id.get(profile_id, '?')
+                    tag = f"SIP Profile: {profile_name}, {ip_addr}:{port}, Domain: {d.get('name', '?')}"
+                    _add_allowlist_entries(e['cidr'], port, tag)
+
+    for s in subscribers:
+        domain_name_for_s = domain_name_by_id.get(s['domain_id'])
+        if not domain_name_for_s:
+            continue
+        for acl_id in subscriber_acl_entries.get(s['id'], []):
+            for e in entries_by_acl.get(acl_id, []):
+                if e.get('action') != 'allow' or not e.get('cidr'):
+                    continue
+                for ip_addr, port in domain_id_to_listeners.get(s['domain_id'], []):
+                    profile_id = next((pid for pid, addr in sip_profile_addr_by_id.items() if addr == (ip_addr, port)), None)
+                    profile_name = sip_profile_name_by_id.get(profile_id, '?')
+                    tag = f"SIP Profile: {profile_name}, {ip_addr}:{port}, User: {s['username']}@{domain_name_for_s}"
+                    _add_allowlist_entries(e['cidr'], port, tag)
+        for cidr in (s.get('inbound_trust_cidr_1'), s.get('inbound_trust_cidr_2')):
+            if cidr and cidr != '0.0.0.0/0':
+                for ip_addr, port in domain_id_to_listeners.get(s['domain_id'], []):
+                    profile_id = next((pid for pid, addr in sip_profile_addr_by_id.items() if addr == (ip_addr, port)), None)
+                    profile_name = sip_profile_name_by_id.get(profile_id, '?')
+                    tag = f"SIP Profile: {profile_name}, {ip_addr}:{port}, User: {s['username']}@{domain_name_for_s}"
+                    _add_allowlist_entries(cidr, port, tag)
+
+
+    # keyed by routing_profile_id alone (bare integer -- no listener
+    # prefix, this table has no network/listener context at all,
+    # purely "give me this profile's rule chain"). Separate SQLite
+    # table/htable from subscriber_auth, per the finalized design.
+    conditions_by_rule_id = {}
+    for c in arithmetic_conditions:
+        conditions_by_rule_id.setdefault(c['rule_id'], []).append(c)
+    rules_by_profile_id = {}
+    for r in arithmetic_rules:
+        rules_by_profile_id.setdefault(r['routing_profile_id'], []).append(r)
+    cur.execute("DELETE FROM routing_profile_data")
+    for profile_id, profile_rules in rules_by_profile_id.items():
+        encoded = encode_arithmetic_profile(profile_rules, conditions_by_rule_id)
+        if encoded:
+            cur.execute("INSERT OR REPLACE INTO routing_profile_data (key_name, key_value) VALUES (?,?)",
+                        (str(profile_id), encoded))
+
+    # blocklist_entries: engine_type='blocklist' membership data.
+    # Resolves each entry's effective action/reject-code/reason/
+    # divert-number against its parent blocklist's default_* fields
+    # (entry-level override wins when set, else the list-wide
+    # default) -- same COALESCE-at-sync-time pattern used throughout
+    # this design, resolved once here rather than at call time.
+    blocklist_by_id = {bl['id']: bl for bl in blocklists}
+    cur.execute("DELETE FROM blocklist_entries")
+    for entry in blocklist_entries_rows:
+        bl = blocklist_by_id.get(entry['blocklist_id'])
+        if not bl:
+            continue
+        action = entry.get('action_override') or bl['default_action']
+        reject_code = entry.get('reject_code_override') or bl['default_reject_code']
+        reject_reason = entry.get('reject_reason_override') or bl['default_reject_reason']
+        divert_number = entry.get('divert_number_override') or bl.get('default_divert_number') or ''
+        key = f"{entry['blocklist_id']}:{entry['number_or_prefix']}"
+        value = f"action={action}|code={reject_code}|reason={reject_reason}|divert={divert_number}|block_on={entry['block_on']}|match_type={entry['match_type']}"
+        cur.execute("INSERT OR REPLACE INTO blocklist_entries (key_name, key_value) VALUES (?,?)", (key, value))
+
+    # Per-SIP-Profile identity allowlist -- type=identity_allowlist
+    # entries in the same unified identity table, same $Ri:$Rp:<value>
+    # key shape as trunk_realm entries above. This is Call 1's "R-URI
+    # host matches our own address" signature -- auto-seeded with each
+    # profile's own EIP/local IP at profile creation, but fully
+    # admin-editable (rows can be removed, including the auto-seeded
+    # defaults, or arbitrary additional realms/hostnames added).
+    for row in sip_profile_identity_rows:
+        listener = sip_profile_addr_by_id.get(row['sip_profile_id'])
+        if not listener:
+            continue
+        key = f"{listener[0]}:{listener[1]}:{row['value']}"
+        value = "type=identity_allowlist"
+        cur.execute("INSERT OR REPLACE INTO subscriber_auth (key_name, key_value) VALUES (?,?)", (key, value))
+
+    # node_fallback_reject: this node's own reject code/text for a
+    # REGISTER whose domain isn't recognized anywhere at all (distinct
+    # from "recognized but not enabled on this profile", which uses
+    # domain_reject_info above).
+    node_row = fetch_all(pcur, "SELECT domain_fallback_reject_code, domain_fallback_reject_text FROM platform_nodes WHERE id = %s", (node_id,))
+    cur.execute("DELETE FROM node_fallback_reject")
+    if node_row:
+        cur.execute("INSERT INTO node_fallback_reject (id, reject_code, reject_text) VALUES (1,?,?)",
+                    (node_row[0]['domain_fallback_reject_code'], node_row[0]['domain_fallback_reject_text']))
+
+    log.info(f"Full sync: {len(trunks)} trunks, {len(profiles)} profiles, "
+             f"{len(prefix_rules)} prefix rules, {len(regex_rules)} regex rules, {len(subscribers)} subscribers, "
+             f"{len(domains)} domains")
+
+
+def _tables_content_hash(cur, table_names):
+    """
+    Deterministic SHA-256 hash of one or more local SQLite tables'
+    full current content. Rows are sorted before hashing since SQLite
+    doesn't guarantee a stable row order without an explicit ORDER BY,
+    and these tables don't all share one obvious single sort key.
+
+    Excludes any column literally named "id" -- every relevant table
+    here (dispatcher, uacreg, address, lcr_gw/rule/rule_target) uses
+    it purely as a surrogate key that sync_full()'s DELETE+re-INSERT
+    pattern doesn't preserve across runs, so its value changes on
+    every single sync even when the real, logical data is completely
+    identical (confirmed live: this caused false "changed" detections
+    on a second, back-to-back run with zero actual data changes,
+    before this exclusion was added). The real, meaningful identifier
+    for each of these tables is always a different column (l_uuid,
+    setid, key_name, ip_addr+grp) already included in the hash.
+    """
+    h = hashlib.sha256()
+    for table in sorted(table_names):
+        cur.execute(f"SELECT * FROM {table}")
+        col_names = [d[0] for d in cur.description]
+        keep_idx = [i for i, name in enumerate(col_names) if name != "id"]
+        rows = cur.fetchall()
+        filtered_rows = [tuple(row[i] for i in keep_idx) for row in rows]
+        for row in sorted(filtered_rows, key=repr):
+            h.update(repr(row).encode("utf-8"))
+        h.update(b"|next_table|")
+    return h.hexdigest()
+
+
+def _maybe_reload(cur, reload_key, table_names, reload_fn, force):
+    """
+    Calls reload_fn() (must return True on success, False on failure --
+    it's responsible for its own logging) only if the combined content
+    of table_names has actually changed since the last time reload_key
+    was SUCCESSFULLY reloaded, or if force is True (the admin-triggered
+    Force Sync override, which bypasses this check entirely for every
+    reload domain in one run).
+
+    This exists because of a real, live-diagnosed problem this
+    session: calling a Kamailio reload RPC unconditionally on every
+    60-second cron run -- regardless of whether anything relevant had
+    actually changed -- caused inconsistent in-memory state for at
+    least the uac module (confirmed live: a clean, successful REGISTER/
+    200 OK cycle in a Homer trace, while kamcmd uac.reg_dump kept
+    showing flags=0/never-registered, with reg_init resetting to
+    within seconds of "now" on every check -- consistent with the
+    registration entry being reloaded out from under itself before its
+    own success could be reflected). Reloading only when the
+    underlying data genuinely changed removes that failure mode
+    entirely for the common case, while Force Sync still provides an
+    explicit, admin-triggered way to unconditionally reload everything
+    regardless of the hash comparison, for troubleshooting or after a
+    manual intervention.
+
+    The stored hash is only updated when reload_fn() itself reports
+    success -- a failed reload attempt (e.g. Kamailio's ctl socket
+    unreachable during a restart window, the same harmless pattern
+    documented elsewhere in this file) must keep retrying on every
+    subsequent run until it genuinely succeeds, not get silently
+    marked "done" just because it was attempted.
+
+    Returns one of "skipped" / "reloaded" / "failed" -- used only for
+    the summary log line at the end of a run, not for control flow.
+    """
+    new_hash = _tables_content_hash(cur, table_names)
+    cur.execute("SELECT content_hash FROM sync_reload_state WHERE reload_key=?", (reload_key,))
+    row = cur.fetchone()
+    old_hash = row[0] if row else None
+    if not force and old_hash == new_hash:
+        return "skipped"
+    ok = reload_fn()
+    if ok:
+        cur.execute(
+            "INSERT INTO sync_reload_state (reload_key, content_hash, last_reloaded_at) VALUES (?,?,?) "
+            "ON CONFLICT(reload_key) DO UPDATE SET content_hash=excluded.content_hash, last_reloaded_at=excluded.last_reloaded_at",
+            (reload_key, new_hash, int(time.time())))
+    return "reloaded" if ok else "failed"
+
+
+def run(incremental=False):
+    # Concurrency guard -- this script runs from a per-minute cron AND
+    # is invoked directly over SSH by Manager-triggered syncs; with no
+    # lock, two overlapping instances race on both the SQLite write
+    # transaction and Kamailio's own reload commands. Bounded wait
+    # (not unbounded) since the caller's own SSH timeout could
+    # otherwise be exceeded -- if still locked after that, exit
+    # cleanly; the instance holding the lock will finish the sync
+    # itself, so there's nothing lost by skipping here.
+    lock_fp = open(LOCK_FILE, 'w')
+    lock_deadline = time.time() + 10
+    got_lock = False
+    while time.time() < lock_deadline:
+        try:
+            fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            got_lock = True
+            break
+        except BlockingIOError:
+            time.sleep(0.5)
+    if not got_lock:
+        log.warning("Another sync-routing.py instance is still running after 10s -- skipping this run, "
+                     "it will complete the sync itself")
+        sys.exit(0)
+
+    try:
+        _run_locked(incremental)
+    finally:
+        fcntl.flock(lock_fp, fcntl.LOCK_UN)
+        lock_fp.close()
+
+
+def _run_locked(incremental=False):
+    try:
+        pg = psycopg2.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER,
+                               password=PG_PASS, connect_timeout=5, sslmode='require',
+                               application_name='sync-routing')
+        pcur = pg.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    except Exception as e:
+        log.warning(f"Manager unreachable: {e} -- keeping last known-good local cache")
+        sys.exit(0)
+
+    node_id, region, force_sync_requested_at = get_node_info(pcur)
+    force = force_sync_requested_at is not None
+
+    do_full = True
+    if incremental and os.path.exists(WATERMARK_FILE):
+        try:
+            mtime = os.path.getmtime(WATERMARK_FILE)
+            if time.time() - mtime < WATERMARK_STALE_SECONDS:
+                do_full = False
+        except OSError:
+            pass
+
+    try:
+        conn = sqlite3.connect(SQLITE_PATH, timeout=5)
+        cur = conn.cursor()
+        # Performance tuning for THIS script's own connection only --
+        # deliberately NOT applied on the Kamailio side. journal_mode
+        # persists in the file itself once set, so it also benefits
+        # every Kamailio worker's own read connections afterward; but
+        # setting it FROM Kamailio's config was ruled out this
+        # session after confirming (via the actual compiled
+        # db_sqlite.so in this deployment, Kamailio 5.7.4) that this
+        # module version has no busy_timeout parameter at all -- and
+        # Kamailio's own db_sqlite docs explicitly warn that setting
+        # journal_mode without a busy_timeout can cause "database
+        # locked" errors at startup, when multiple worker processes
+        # race to set it simultaneously. Setting it here instead is
+        # safe because this script is always a single process with a
+        # single connection -- no race is possible. synchronous=NORMAL
+        # is safe to pair with WAL and only matters for the one
+        # process that actually writes to this file (this one --
+        # Kamailio itself never writes here, confirmed earlier).
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.execute("BEGIN")
+        # NOTE: incremental delta application (reading platform_sync_log
+        # since the local watermark) is the fast path for the common
+        # case; this reference implementation always does the full,
+        # always-correct rebuild, which is idempotent and cheap enough
+        # at realistic rule-set sizes -- the watermark file's presence
+        # is tracked for future incremental-delta optimization without
+        # changing correctness today.
+        sync_full(cur, pcur, node_id)
+        conn.commit()
+
+        # Real bug found in production: dispatcher (unlike permissions,
+        # which queries its address table live per-request via
+        # db_mode=1) only ever loads its destination set from the DB
+        # at Kamailio's own startup. Every run of this script was
+        # correctly rewriting the local `dispatcher` table, but
+        # Kamailio's in-memory copy never picked up any of it -- a
+        # trunk added after the node was last (re)started would sync
+        # "successfully" by every log line here while `kamcmd
+        # dispatcher.list` kept reporting it as though it didn't
+        # exist. Best-effort: a failure here shouldn't fail the whole
+        # sync run, since the correct data is already durably on disk
+        # regardless -- worst case, the next successful reload (this
+        # runs every minute) picks it up.
+        #
+        # Each reload below is now change-gated via _maybe_reload():
+        # the RPC is only actually called when the specific table(s)
+        # it depends on have changed since the last successful reload
+        # of that same domain, or when force is True (Force Sync, an
+        # explicit admin override -- see node_force_sync() in web.py).
+        # This exists because of a real, live-diagnosed problem this
+        # session: calling every reload unconditionally on every
+        # 60-second cron run, regardless of whether anything relevant
+        # had changed, caused Kamailio's own in-memory uac registration
+        # state to never settle into "successfully registered" despite
+        # a clean, successful REGISTER/200 OK cycle confirmed in a
+        # Homer trace -- see _maybe_reload()'s own docstring for the
+        # full reasoning.
+        reload_summary = {}
+
+        def _dispatcher_reload():
+            try:
+                r = subprocess.run([KAMCMD_PATH, "dispatcher.reload"], capture_output=True, text=True, timeout=10)
+                if r.returncode != 0:
+                    log.warning(f"dispatcher.reload failed: {r.stdout.strip()} {r.stderr.strip()}")
+                return r.returncode == 0
+            except Exception as e:
+                log.warning(f"Could not run dispatcher.reload: {e}")
+                return False
+        reload_summary["dispatcher"] = _maybe_reload(cur, "dispatcher", ["dispatcher", "dispatcher_setid_alg"], _dispatcher_reload, force)
+
+        # Real gap found this session, live: the uac module only ever
+        # loads uacreg rows into memory at startup -- confirmed
+        # directly (Kamailio module source + community reports). A
+        # trunk added or edited after the node was last (re)started
+        # would sync its uacreg row to disk "successfully" every sync
+        # run, but Kamailio would never actually attempt registration
+        # for it at all -- not "attempted and failed", genuinely never
+        # attempted -- until someone happened to restart Kamailio
+        # manually. Same shape of problem dispatcher.reload already
+        # solves for routing, just never applied to registration.
+        def _uac_reload():
+            try:
+                r = subprocess.run([KAMCMD_PATH, "uac.reg_reload"], capture_output=True, text=True, timeout=10)
+                if r.returncode != 0:
+                    log.warning(f"uac.reg_reload failed: {r.stdout.strip()} {r.stderr.strip()}")
+                return r.returncode == 0
+            except Exception as e:
+                log.warning(f"Could not run uac.reg_reload: {e}")
+                return False
+        reload_summary["uac"] = _maybe_reload(cur, "uac", ["uacreg"], _uac_reload, force)
+
+        # Backs the subscriber_lookup routing engine -- same shape of
+        # problem as dispatcher/uac above: htable's dbtable-backed
+        # tables only load at startup otherwise, confirmed via this
+        # session's own research into the htable module's RPC commands.
+        def _make_ht_reload(ht_name):
+            def _reload():
+                try:
+                    r = subprocess.run([KAMCMD_PATH, "htable.reload", ht_name], capture_output=True, text=True, timeout=10)
+                    if r.returncode != 0:
+                        log.warning(f"htable.reload {ht_name} failed: {r.stdout.strip()} {r.stderr.strip()}")
+                    return r.returncode == 0
+                except Exception as e:
+                    log.warning(f"Could not run htable.reload {ht_name}: {e}")
+                    return False
+            return _reload
+        reload_summary["htable:subscriber_numbers"] = _maybe_reload(cur, "htable:subscriber_numbers", ["subscriber_numbers"], _make_ht_reload("subscriber_numbers"), force)
+        reload_summary["htable:trunk_numbers"] = _maybe_reload(cur, "htable:trunk_numbers", ["trunk_numbers"], _make_ht_reload("trunk_numbers"), force)
+        # The remaining six htables were NEVER actually reloaded here at
+        # all -- confirmed via exhaustive search across this entire
+        # file, only subscriber_numbers/trunk_numbers above were ever
+        # wired up, despite log-watchdog.py's own docstring separately
+        # claiming this list had already been extended to all of them.
+        # subscriber_auth (Call 1's whole identity table) and trunk_ip_
+        # identity (Call 2) are the two most critical tables on the
+        # entire platform -- both were only ever loaded once at
+        # Kamailio startup and stayed frozen at that initial state
+        # regardless of how many syncs ran afterward, even though the
+        # data was being correctly written to SQLite every single sync.
+        # Found via a live, real mismatch report (trunk_ip_identity:
+        # 16 rows in SQLite, 8 live in Kamailio) surfaced by the
+        # SQLite-to-live integrity check this session added coverage
+        # for -- the check caught the symptom; this is the actual,
+        # underlying cause.
+        reload_summary["htable:subscriber_auth"] = _maybe_reload(cur, "htable:subscriber_auth", ["subscriber_auth"], _make_ht_reload("subscriber_auth"), force)
+        reload_summary["htable:trunk_ip_identity"] = _maybe_reload(cur, "htable:trunk_ip_identity", ["trunk_ip_identity"], _make_ht_reload("trunk_ip_identity"), force)
+        reload_summary["htable:routing_profile_data"] = _maybe_reload(cur, "htable:routing_profile_data", ["routing_profile_data"], _make_ht_reload("routing_profile_data"), force)
+        reload_summary["htable:routing_profile_meta"] = _maybe_reload(cur, "htable:routing_profile_meta", ["routing_profile_meta"], _make_ht_reload("routing_profile_meta"), force)
+        reload_summary["htable:sip_listeners"] = _maybe_reload(cur, "htable:sip_listeners", ["sip_listeners_ht"], _make_ht_reload("sip_listeners"), force)
+        reload_summary["htable:sip_profile_domains"] = _maybe_reload(cur, "htable:sip_profile_domains", ["sip_profile_domains_ht"], _make_ht_reload("sip_profile_domains"), force)
+        reload_summary["htable:dispatcher_setid_alg"] = _maybe_reload(cur, "htable:dispatcher_setid_alg", ["dispatcher_setid_alg_ht"], _make_ht_reload("dispatcher_setid_alg"), force)
+        reload_summary["htable:dispatcher_attrs"] = _maybe_reload(cur, "htable:dispatcher_attrs", ["dispatcher_attrs_ht"], _make_ht_reload("dispatcher_attrs"), force)
+        reload_summary["htable:dispatcher_dest_attrs"] = _maybe_reload(cur, "htable:dispatcher_dest_attrs", ["dispatcher_dest_attrs_ht"], _make_ht_reload("dispatcher_dest_attrs"), force)
+        reload_summary["htable:media_profiles"] = _maybe_reload(cur, "htable:media_profiles", ["media_profiles_ht"], _make_ht_reload("media_profiles"), force)
+        reload_summary["htable:trunk_credentials"] = _maybe_reload(cur, "htable:trunk_credentials", ["trunk_credentials_ht"], _make_ht_reload("trunk_credentials"), force)
+        reload_summary["htable:trunk_dispatcher_attrs"] = _maybe_reload(cur, "htable:trunk_dispatcher_attrs", ["trunk_dispatcher_attrs_ht"], _make_ht_reload("trunk_dispatcher_attrs"), force)
+        reload_summary["htable:subscriber_forwarding_meta"] = _maybe_reload(cur, "htable:subscriber_forwarding_meta", ["subscriber_forwarding_meta_ht"], _make_ht_reload("subscriber_forwarding_meta"), force)
+        reload_summary["htable:subscriber_outbound_meta"] = _maybe_reload(cur, "htable:subscriber_outbound_meta", ["subscriber_outbound_meta_ht"], _make_ht_reload("subscriber_outbound_meta"), force)
+        reload_summary["htable:blocklist_entries"] = _maybe_reload(cur, "htable:blocklist_entries", ["blocklist_entries"], _make_ht_reload("blocklist_entries"), force)
+        reload_summary["htable:listener_settings"] = _maybe_reload(cur, "htable:listener_settings", ["listener_settings"], _make_ht_reload("listener_settings"), force)
+        reload_summary["htable:response_reasons"] = _maybe_reload(cur, "htable:response_reasons", ["response_reasons"], _make_ht_reload("response_reasons"), force)
+
+        # Backs route[REGISTER]'s fast path (subscriber_auth) and its
+        # miss-path (listener_settings) -- same dbtable-only-loads-at-
+        # startup reasoning as subscriber_numbers above.
+        for auth_ht_name in ("subscriber_auth", "listener_settings"):
+            reload_summary[f"htable:{auth_ht_name}"] = _maybe_reload(cur, f"htable:{auth_ht_name}", [auth_ht_name], _make_ht_reload(auth_ht_name), force)
+
+        # Real bug found and fixed this session: the permissions
+        # module caches the entire `address` table in shared memory
+        # at Kamailio startup (db_mode=1) and only re-reads it on this
+        # explicit RPC call -- confirmed live (inserted a row directly
+        # into the local SQLite file, re-tested allow_source_address()
+        # with no reload called, still stale/rejected; called this
+        # RPC, immediately picked up, no restart needed). This script
+        # was rewriting `address` every run (trunk trust at grp=1,
+        # every domain's ACL groups at 10000+/20000+domain_id) but
+        # never once called this -- meaning every trunk or domain ACL
+        # change via the Manager had zero effect on a running node
+        # until manual restart, silently, the whole time this table
+        # existed.
+        def _addr_reload():
+            try:
+                r = subprocess.run([KAMCMD_PATH, "permissions.addressReload"], capture_output=True, text=True, timeout=10)
+                if r.returncode != 0:
+                    log.warning(f"permissions.addressReload failed: {r.stdout.strip()} {r.stderr.strip()}")
+                return r.returncode == 0
+            except Exception as e:
+                log.warning(f"Could not run permissions.addressReload: {e}")
+                return False
+        reload_summary["permissions"] = _maybe_reload(cur, "permissions", ["address"], _addr_reload, force)
+
+        # Backs the lcr engine type -- same reasoning as the reload
+        # calls above, this module's DB-backed gw/rule/rule_target
+        # tables only ever load at startup otherwise.
+        def _lcr_reload():
+            try:
+                r = subprocess.run([KAMCMD_PATH, "lcr.reload"], capture_output=True, text=True, timeout=10)
+                if r.returncode != 0:
+                    log.warning(f"lcr.reload failed: {r.stdout.strip()} {r.stderr.strip()}")
+                return r.returncode == 0
+            except Exception as e:
+                log.warning(f"Could not run lcr.reload: {e}")
+                return False
+        reload_summary["lcr"] = _maybe_reload(cur, "lcr", ["lcr_gw", "lcr_rule", "lcr_rule_target"], _lcr_reload, force)
+
+        # Security services (IPS/fail2ban) -- per the requirement that
+        # changing a security rule and pushing should take effect
+        # immediately, not on some later timer. Gated on `force` (a full
+        # sync/push, i.e. the admin explicitly applying changes) rather
+        # than running on every routine incremental sync: restarting
+        # fail2ban briefly interrupts detection, so doing it on the
+        # normal ~60s cycle would actively weaken protection for no
+        # benefit. Never fatal -- fail2ban being unrestartable must not
+        # break routing sync.
+        #
+        # systemctl restart, NOT fail2ban-client reload -- confirmed by
+        # direct reproduction that reload only affects FUTURE bans. An
+        # IP already banned under an OLDER action/policy keeps its OLD
+        # firewall rule forever after a reload, even though fail2ban's
+        # own "Currently banned" bookkeeping still lists it correctly --
+        # the two silently diverge, which is exactly what a user hit in
+        # production (banned list showed the IP, firewall did not). A
+        # full restart re-applies the CURRENT action to every
+        # persistently-tracked, still-unexpired ban (fail2ban reads its
+        # own sqlite dbfile on startup and re-bans accordingly).
+        # systemctl (not fail2ban-client restart) to match this
+        # platform's own convention for every other service restart.
+        #
+        # Explicit stop + forced cleanup of any stale f2b-* chain state
+        # + fresh start, not a bare restart -- mirrors nodeops.
+        # apply_fail2ban_jails' identical fix. Found in production: an
+        # earlier action definition (e.g. one referencing a binary that
+        # turned out to be missing on that node) can leave partial/
+        # inconsistent chain state behind that a plain restart doesn't
+        # clean up. Doesn't lose legitimate active bans -- fail2ban's
+        # own sqlite dbfile still correctly re-applies every currently-
+        # valid ban on start, just into a guaranteed-clean structure.
+        if force:
+            try:
+                cleanup_script = (
+                    "systemctl stop fail2ban 2>&1; "
+                    "for c in $(iptables -S 2>/dev/null | grep -oE 'f2b-[a-zA-Z0-9_-]+' | sort -u); do "
+                    "  iptables -F \"$c\" 2>/dev/null; done; "
+                    "for j in $(iptables -S INPUT 2>/dev/null | grep -oE 'f2b-[a-zA-Z0-9_-]+' | sort -u); do "
+                    "  for p in tcp udp icmp; do iptables -D INPUT -p \"$p\" -j \"$j\" 2>/dev/null; done; "
+                    "  iptables -D INPUT -j \"$j\" 2>/dev/null; done; "
+                    "for c in $(iptables -S 2>/dev/null | grep -oE 'f2b-[a-zA-Z0-9_-]+' | sort -u); do "
+                    "  iptables -X \"$c\" 2>/dev/null; done; "
+                    "command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | grep -qi f2b "
+                    "&& nft flush ruleset 2>/dev/null; "
+                    "systemctl start fail2ban 2>&1"
+                )
+                r = subprocess.run(["bash", "-c", cleanup_script],
+                                   capture_output=True, text=True, timeout=30)
+                if r.returncode == 0:
+                    log.info("Security services: fail2ban stopped, stale chain state cleared, restarted fresh (all tracked bans re-applied)")
+                    reload_summary["fail2ban"] = "reloaded"
+                else:
+                    log.warning(f"Security services: fail2ban restart failed: {(r.stderr or r.stdout or '').strip()[:200]}")
+                    reload_summary["fail2ban"] = "failed"
+            except Exception as f2b_err:
+                log.warning(f"Security services: could not restart fail2ban: {f2b_err}")
+                reload_summary["fail2ban"] = "failed"
+
+        conn.commit()
+        reloaded = [k for k, v in reload_summary.items() if v == "reloaded"]
+        skipped = [k for k, v in reload_summary.items() if v == "skipped"]
+        failed = [k for k, v in reload_summary.items() if v == "failed"]
+        log.info(f"Reload summary{' (forced)' if force else ''}: reloaded={reloaded or 'none'}, skipped(unchanged)={len(skipped)}, failed={failed or 'none'}")
+
+        if force:
+            try:
+                pcur.execute("UPDATE platform_nodes SET force_sync_requested_at = NULL WHERE id = %s", (node_id,))
+                pg.commit()
+            except Exception as clear_err:
+                log.warning(f"Could not clear force_sync_requested_at: {clear_err}")
+
+        os.makedirs(os.path.dirname(WATERMARK_FILE), exist_ok=True)
+        with open(WATERMARK_FILE, 'w') as f:
+            f.write(str(int(__import__('time').time())))
+
+        # Report success back to the Manager -- this is what lets the
+        # UI show a "sync pending" indicator (comparing the most
+        # recent change in platform_sync_log against this timestamp)
+        # rather than the previous state where nothing ever confirmed
+        # a sync had actually happened.
+        try:
+            pcur.execute("UPDATE platform_nodes SET last_routing_sync_at = NOW() WHERE id = %s", (node_id,))
+            pg.commit()
+        except Exception as report_err:
+            log.warning(f"Could not report sync timestamp back to Manager: {report_err}")
+
+        log.info(f"Region '{region}' (node_id={node_id}): sync complete [SCRIPT-VERSION: {SCRIPT_VERSION}]")
+    except Exception as e:
+        log.exception(f"SQLite write failed: {e}")
+        # "disk I/O error" specifically is SQLite's own wording for an
+        # underlying filesystem problem (full disk, read-only remount
+        # after an earlier corruption event, permissions, or -- less
+        # commonly -- a network filesystem SQLite handles locking on
+        # poorly) -- not something retryable from within this script's
+        # own logic. Surfacing the likely cause immediately saves an
+        # SSH round-trip to manually check by hand.
+        if "disk I/O error" in str(e) or "readonly database" in str(e).lower():
+            try:
+                usage = shutil.disk_usage(os.path.dirname(SQLITE_PATH))
+                free_mb = usage.free // (1024 * 1024)
+                log.error(f"Disk space check: {free_mb} MB free on the filesystem containing {SQLITE_PATH}")
+                if free_mb < 50:
+                    log.error("Disk is nearly or completely full -- this is almost certainly the cause. Free up space and re-run.")
+            except Exception as disk_check_err:
+                log.error(f"Could not check disk space: {disk_check_err}")
+            # A real write attempt, not os.access() -- os.access() is
+            # documented as unreliable for a root process (which this
+            # script runs as, via cron): root can bypass permission
+            # bits entirely, so os.access() would report writable even
+            # when the underlying filesystem genuinely isn't (e.g. a
+            # read-only remount after an earlier disk error) -- caught
+            # by actually testing this rather than assuming it worked.
+            probe_path = os.path.join(os.path.dirname(SQLITE_PATH), ".write_probe")
+            try:
+                with open(probe_path, "w") as f:
+                    f.write("probe")
+                os.remove(probe_path)
+            except OSError as probe_err:
+                log.error(f"Write test to {os.path.dirname(SQLITE_PATH)} failed ({probe_err}) -- filesystem may be read-only or have a permissions problem beyond what root normally bypasses.")
+            # A leftover -wal/-shm file from an earlier crashed process
+            # can also produce this error if it's owned by a different
+            # user or the filesystem remounted read-only mid-write --
+            # worth surfacing since deleting stale ones (only safe when
+            # no Kamailio process is using the DB) is a common real fix.
+            for suffix in ("-wal", "-shm", "-journal"):
+                leftover = SQLITE_PATH + suffix
+                if os.path.exists(leftover):
+                    log.error(f"Found {leftover} -- if this is stale (no Kamailio process using the DB right now), it may be worth investigating/removing.")
+        conn.rollback()
+        sys.exit(1)
+    finally:
+        conn.close()
+        pcur.close()
+        pg.close()
+
+
+if __name__ == '__main__':
+    run(incremental='--incremental' in sys.argv)

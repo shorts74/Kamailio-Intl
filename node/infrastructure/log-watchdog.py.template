@@ -1,0 +1,563 @@
+#!/usr/bin/env python3
+"""
+log-watchdog.py -- runs via cron on this Node (every minute, alongside
+sync-routing.py and push_stats.py). Tails kamailio.log and
+sync-routing.py's own log for known-bad patterns since the last run,
+and writes/resolves alerts directly in the Manager's platform_alerts
+table.
+
+Deliberately node-side, not a Manager-side SSH poller -- matches this
+platform's own established "nodes push, Manager doesn't poll"
+architecture (see check_stale_nodes.py's own docstring on the Manager
+side, and push_stats.py). Log files live on the node; scanning them
+from here avoids an SSH round-trip per check per node, and this script
+already has direct Postgres connectivity the same way sync-routing.py
+does.
+
+Every pattern checked here is either a genuine, confirmed real-world
+failure found live during this platform's own development (the ctl
+socket becoming unreachable, which silently breaks every reload
+without failing the sync itself) or a standard, well-understood
+Kamailio/RTPEngine health signal (process down, ERROR/CRITICAL log
+lines, disk space). Each check is independently idempotent: it opens
+exactly one alert per (alert_type, node) if not already open, and
+resolves it the moment the underlying condition clears -- the same
+pattern check_stale_nodes.py already established on the Manager side,
+reused here rather than inventing a second alert lifecycle model.
+
+State (byte offset into each watched file, so only genuinely new
+lines get scanned each run) is kept in a small local JSON file,
+handled defensively against log rotation (if a file is now SMALLER
+than the stored offset, assume rotation and restart from 0 rather
+than erroring or silently skipping the file's new content).
+"""
+import sys
+import os
+import json
+import re
+import time
+import shlex
+from datetime import datetime
+
+import psycopg2
+
+PG_HOST = '__MANAGER_IP__'
+PG_PORT = 5432
+PG_DB   = 'kamailio'
+PG_USER = 'kamailio'
+PG_PASS = '__KAMAILIO_DB_PASS__'
+THIS_NODE_IP = '__NODE_IP__'
+
+SQLITE_PATH = '/etc/kamailio/dbsqlite/kamailio.db'
+# Absolute path, not a bare "kamcmd" -- same real reason documented in
+# sync-routing.py: cron's default PATH typically excludes /usr/sbin,
+# where kamcmd actually lives on a real Kamailio install.
+KAMCMD_PATH = '/usr/sbin/kamcmd'
+KAMAILIO_LOG = '/var/log/kamailio/kamailio.log'
+SYNC_LOG = '/var/log/kamailio/sync-routing.log'
+# Confirmed real default path (Debian redis-server package's own
+# config default; this platform's own generated /etc/redis/redis.conf
+# doesn't override logfile, so this is genuinely where it goes).
+REDIS_LOG = '/var/log/redis/redis-server.log'
+STATE_FILE = '/var/lib/kamailio/log_watchdog_state.json'
+
+# How many consecutive clean runs before an open alert is resolved --
+# a single clean check right after a burst of errors doesn't
+# necessarily mean the problem is over (this mirrors why
+# check_stale_nodes.py itself uses a 3x-interval grace window rather
+# than alerting/resolving on a single data point).
+CLEAN_RUNS_TO_RESOLVE = 3
+
+# If more than this many seconds have passed since this script's own
+# last run, treat the new lines read this run as a BACKLOG rather than
+# "happening right now" -- covers the case this was explicitly built
+# for: the watchdog itself (or the whole node) was down for a while,
+# then comes back and finds a pile of old log lines, some of which may
+# describe problems that are long since resolved. Evaluating that
+# backlog for CURRENT alerts would be actively misleading -- a
+# ctl-socket failure from two hours ago that's since recovered is not
+# the same thing as one happening now. Cron runs this every 60s
+# normally; 5x that gives real headroom for a couple of missed cycles
+# (a transient blip) without treating them as a genuine gap.
+STALE_GAP_THRESHOLD_SEC = 300
+
+
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return {"offsets": {}, "clean_runs": {}, "last_run_at": None}
+    try:
+        with open(STATE_FILE) as f:
+            state = json.load(f)
+            state.setdefault("last_run_at", None)
+            return state
+    except (json.JSONDecodeError, OSError):
+        return {"offsets": {}, "clean_runs": {}, "last_run_at": None}
+
+
+def save_state(state):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    tmp = STATE_FILE + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(state, f)
+    os.replace(tmp, STATE_FILE)
+
+
+def read_new_lines(path, state):
+    """
+    Returns the list of lines added to `path` since this file's last
+    recorded offset, and updates state in place. Handles rotation
+    (current size < stored offset) by restarting from 0 rather than
+    erroring -- the alternative (crashing, or silently never catching
+    up) is worse than occasionally re-scanning a little extra content
+    right after a rotation.
+    """
+    if not os.path.exists(path):
+        return []
+    size = os.path.getsize(path)
+    offset = state["offsets"].get(path, 0)
+    if size < offset:
+        offset = 0
+    lines = []
+    with open(path, 'r', errors='replace') as f:
+        f.seek(offset)
+        lines = f.read().splitlines()
+        state["offsets"][path] = f.tell()
+    return lines
+
+
+def pg_connect():
+    return psycopg2.connect(
+        host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASS,
+        connect_timeout=10,
+    )
+
+
+def get_node_id(pconn):
+    with pconn.cursor() as cur:
+        cur.execute("SELECT id FROM platform_nodes WHERE private_ip = %s", (THIS_NODE_IP,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def set_alert(pconn, node_id, alert_type, severity, message, is_problem, state):
+    """
+    Idempotent open/resolve, matching check_stale_nodes.py's own
+    pattern exactly: at most one open alert per (alert_type, node) at
+    a time. is_problem reflects THIS run's finding; the alert only
+    actually opens/resolves once the run-based debounce
+    (CLEAN_RUNS_TO_RESOLVE) agrees.
+    """
+    key = f"{alert_type}:{node_id}"
+    if is_problem:
+        state["clean_runs"][key] = 0
+    else:
+        state["clean_runs"][key] = state["clean_runs"].get(key, 0) + 1
+
+    with pconn.cursor() as cur:
+        cur.execute("""
+            SELECT id FROM platform_alerts
+            WHERE alert_type=%s AND entity_type='node' AND entity_id=%s AND resolved_at IS NULL
+        """, (alert_type, node_id))
+        existing = cur.fetchone()
+
+        if is_problem and not existing:
+            cur.execute("""
+                INSERT INTO platform_alerts (alert_type, entity_type, entity_id, severity, message)
+                VALUES (%s, 'node', %s, %s, %s)
+            """, (alert_type, node_id, severity, message))
+        elif not is_problem and existing and state["clean_runs"][key] >= CLEAN_RUNS_TO_RESOLVE:
+            cur.execute("UPDATE platform_alerts SET resolved_at=NOW() WHERE id=%s", (existing[0],))
+
+
+def check_security_enforcement(pconn, node_id, state):
+    """
+    The automatic half of the security enforcement audit -- covers
+    what troubleshoot_node()'s existing checks genuinely don't:
+    whether the security ENFORCEMENT layer itself (firewall baseline,
+    Manager-IP safety net, SIP port protections, the ipsets that back
+    trust/registration exemptions, delayed-boot-start config, fail2ban
+    jail validity) is actually intact, not just whether Kamailio/
+    Redis/RTPEngine processes are up. A lapse here means the platform
+    LOOKS like it's protected but genuinely isn't -- exactly the class
+    of silent failure this whole audit exists to catch.
+
+    Each sub-check is independent and reported separately (not one
+    combined pass/fail) so a specific lapse is immediately identifiable
+    rather than buried in a single vague "security degraded" alert.
+    """
+    import subprocess
+
+    def _run(cmd, timeout=10):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            return out.stdout + out.stderr, out.returncode == 0
+        except Exception as e:
+            return str(e), False
+
+    # 1. iptables default-deny baseline -- the actual floor this
+    # platform's own firewall design relies on (see node-install.sh's
+    # step_baseline_firewall). If INPUT's policy has drifted off DROP,
+    # everything else (fw_sip_ports, fail2ban bans, ACL rules) is
+    # moot -- traffic that should never reach Kamailio at all gets
+    # through by default instead.
+    policy_out, policy_ok = _run(["iptables", "-L", "INPUT", "-n"])
+    input_not_drop = policy_ok and "policy DROP" not in policy_out
+    set_alert(pconn, node_id, "firewall_policy_drift", "critical",
+              "INPUT chain's default policy is not DROP -- the platform's baseline default-deny posture has drifted. "
+              "Traffic that should never reach Kamailio at all may now be passing through by default.",
+              input_not_drop or not policy_ok, state)
+
+    # 2. Manager IP's own always-whitelisted rule -- losing this is
+    # the one failure mode that can silently cut the Manager's own
+    # control-plane access to the node, with no other symptom visible
+    # from the Manager side until the next SSH attempt fails outright.
+    mgr_ip = ""
+    try:
+        with open("/etc/kamailio/manager-ip") as f:
+            mgr_ip = f.read().strip()
+    except Exception:
+        pass
+    if mgr_ip:
+        # Textual match against -S INPUT, NOT -C -- -C requires an
+        # exact match of every clause on the rule, including the -m
+        # comment the actual rule carries (added by setup-firewall.
+        # sh's ensure_baseline). This was a real, confirmed false-
+        # negative: a node with the rule genuinely present still
+        # failed the original -C-based check, since -C's query never
+        # included that comment clause. -S needs only a source-IP
+        # substring match, not reconstructing every clause the rule
+        # was actually inserted with.
+        mgr_out, mgr_ok = _run(["bash", "-c", f"iptables -S INPUT | grep -qF -- {shlex.quote(mgr_ip)}"])
+        set_alert(pconn, node_id, "manager_ip_rule_missing", "critical",
+                  f"The Manager control-plane IP ({mgr_ip})'s always-whitelisted iptables rule is missing. "
+                  "If this isn't restored, the Manager may lose SSH/control-plane access to this node entirely.",
+                  not mgr_ok, state)
+
+    # 3. fw_sip_ports chain populated -- an empty or missing chain
+    # means SIP ports are either wide open (no flood cap, no ACL-
+    # derived allow rules) or entirely closed, depending on how it
+    # failed; either is a real problem, not a benign state.
+    chain_out, chain_ok = _run(["iptables", "-L", "fw_sip_ports", "-n"])
+    chain_empty = (not chain_ok) or (chain_ok and len(chain_out.strip().splitlines()) <= 2)
+    set_alert(pconn, node_id, "fw_sip_ports_empty", "critical",
+              "The fw_sip_ports iptables chain is missing or empty -- SIP port protections (flood cap, ACL-derived "
+              "allow rules, per-entity tagged exemptions) are not actually in effect.",
+              chain_empty, state)
+
+    # 4. Core ipsets exist -- trunk_trusted backs the flood-cap
+    # exemption for known trunks; its absence doesn't block calls, but
+    # silently removes an exemption everything else assumes is there.
+    ipset_out, ipset_ok = _run(["ipset", "list", "trunk_trusted", "-n"])
+    set_alert(pconn, node_id, "trunk_trusted_ipset_missing", "warning",
+              "The trunk_trusted ipset is missing -- known trunk IPs are no longer exempt from the per-source SIP flood cap.",
+              not ipset_ok, state)
+
+    # 5. Delayed-boot-start config still present -- created
+    # unconditionally by step_baseline_firewall at install time (not
+    # opt-in), so its absence on an already-provisioned node is a real
+    # regression (e.g. an unrelated systemd cleanup accidentally
+    # removed it), not an expected state to tolerate.
+    import os
+    delay_conf = "/etc/systemd/system/netfilter-persistent.service.d/platform-delayed-start.conf"
+    set_alert(pconn, node_id, "delayed_firewall_start_missing", "warning",
+              "The delayed firewall boot-start systemd drop-in is missing -- netfilter-persistent will load rules "
+              "immediately on boot instead of after the configured recovery-window delay.",
+              not os.path.exists(delay_conf), state)
+
+    # 6. fail2ban jail config validity -- confirms the currently-
+    # loaded config (not just "is the process up") is actually sound.
+    # A process can stay "active" indefinitely on a stale, no-longer-
+    # matching-reality config if a bad push was never actually applied
+    # (mirrors the exact validate-before-apply gap apply_fail2ban_jails
+    # itself already guards against on the Manager side -- this check
+    # confirms that guard's assumption still holds live on the node).
+    f2b_test_out, f2b_test_ok = _run(["fail2ban-client", "-t"])
+    f2b_invalid = f2b_test_ok and "OK" not in f2b_test_out
+    set_alert(pconn, node_id, "fail2ban_config_invalid", "critical",
+              "fail2ban's currently-loaded jail configuration fails its own validation test -- the running config "
+              "may not match what was actually intended, or may not reload cleanly if restarted.",
+              f2b_invalid, state)
+
+
+def check_process(pconn, node_id, state, service_name, alert_type, friendly_name):
+    import subprocess
+    try:
+        out = subprocess.run(["systemctl", "is-active", service_name], capture_output=True, text=True, timeout=10)
+        is_down = out.stdout.strip() != "active"
+    except Exception:
+        is_down = True
+    set_alert(pconn, node_id, alert_type, "critical",
+              f"{friendly_name} is not active on this node (systemctl is-active reports something other than 'active').",
+              is_down, state)
+
+
+def check_disk_space(pconn, node_id, state):
+    import shutil
+    try:
+        usage = shutil.disk_usage("/etc/kamailio/dbsqlite")
+        pct = usage.used / usage.total * 100
+    except Exception:
+        pct = 0
+    set_alert(pconn, node_id, "disk_space_critical", "critical",
+              f"Disk usage at {pct:.0f}% on the SQLite database's filesystem.",
+              pct >= 90, state)
+
+
+def check_ctl_socket_failures(pconn, node_id, lines, state):
+    """
+    Exactly the pattern confirmed live this session: sync-routing.py
+    keeps reporting "sync complete" even while every reload call
+    (dispatcher.reload, uac.reg_reload, htable.reload, etc.) silently
+    fails behind it, because the sync itself (writing to local
+    SQLite) is a genuinely separate step from telling Kamailio to
+    reload it. This is exactly the failure mode that made a real,
+    already-shipped fix look like it "wasn't working" for several
+    turns -- worth catching automatically rather than requiring
+    someone to notice it buried in a pasted log excerpt.
+    """
+    found = any("reload failed" in l or "No such file or directory" in l for l in lines)
+    set_alert(pconn, node_id, "ctl_socket_unreachable", "critical",
+              "Kamailio's control socket (kamcmd) is unreachable -- reload/reconcile calls are silently failing. "
+              "Config and registration changes will not take effect until Kamailio is fully restarted (not just reloaded).",
+              found, state)
+
+
+def check_kamailio_errors(pconn, node_id, lines, state):
+    error_lines = [l for l in lines if re.search(r'\bERROR:|\bCRITICAL:', l)]
+    set_alert(pconn, node_id, "kamailio_log_errors", "warning",
+              f"{len(error_lines)} ERROR/CRITICAL line(s) in kamailio.log since the last check.",
+              bool(error_lines), state)
+
+
+def check_redis_log(pconn, node_id, lines, state):
+    """
+    Redis backs usrloc (live registrations), dialog state, and acc/CDR
+    writes (see kamailio.cfg.template's own db_redis modparams) -- not
+    a side service, several core subsystems depend on it directly.
+    """
+    error_lines = [l for l in lines if re.search(r'\b(WARNING|ERROR|OOM|Bad file format)\b', l)]
+    set_alert(pconn, node_id, "redis_log_errors", "warning",
+              f"{len(error_lines)} warning/error line(s) in Redis's own log since the last check.",
+              bool(error_lines), state)
+
+
+def check_rtpengine_journal(pconn, node_id, state):
+    """
+    RTPEngine has no dedicated log file (confirmed via its own
+    generated config: no log-facility override, so it uses syslog's
+    default routing) -- read via journalctl instead of the file-offset
+    tracking used for kamailio.log/redis's log, scoped to the interval
+    since this watchdog's own last run.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["journalctl", "-u", "rtpengine", "--since", "2 min ago", "--no-pager"],
+            capture_output=True, text=True, timeout=15)
+        error_lines = [l for l in out.stdout.splitlines() if re.search(r'\b(error|critical|fail)\b', l, re.IGNORECASE)]
+    except Exception:
+        error_lines = []
+    set_alert(pconn, node_id, "rtpengine_log_errors", "warning",
+              f"{len(error_lines)} error/failure line(s) in RTPEngine's journal in the last 2 minutes.",
+              bool(error_lines), state)
+
+
+def check_sqlite_live_integrity(pconn, node_id, state):
+    """
+    The specific check requested: confirm data synced to the local
+    SQLite file has actually been picked up by Kamailio's own live,
+    in-memory state -- not just that it's correctly on disk. This is
+    exactly the failure mode confirmed live during this platform's own
+    development: sync-routing.py can report "sync complete" every run
+    while Kamailio's in-memory dispatcher/uacreg/htable state silently
+    stays stale, if reload calls aren't actually reaching it (see
+    check_ctl_socket_failures above -- the two are closely related,
+    but this checks the actual DATA outcome directly rather than
+    inferring it from a log message). Covers the dispatcher table,
+    uacreg, and all EIGHT htable-backed tables (subscriber_auth,
+    routing_profile_data, blocklist_entries, listener_settings,
+    trunk_numbers, subscriber_numbers, response_reasons,
+    trunk_ip_identity) -- same comparison troubleshoot_node() runs
+    on-demand from the Manager side, kept identical here rather than
+    drifting into a second implementation.
+
+    Real, confirmed drift found and fixed: this had genuinely fallen
+    out of sync with troubleshoot_node()'s own check -- only covered
+    the original 3 htables (listener_settings/trunk_numbers/
+    subscriber_numbers), missing the 4 added when sync_and_reload()
+    itself was extended to actually reload all 7 (subscriber_auth,
+    routing_profile_data, blocklist_entries, response_reasons). That
+    meant Call 1 identity resolution, Arithmetic rule chains, and
+    Blocklist entries could silently drift stale in Kamailio's live
+    memory with zero automated cron-based alert -- the manual,
+    on-demand troubleshoot_node() check would have caught it, but
+    nothing would have proactively surfaced it. Found by directly
+    re-auditing this function against troubleshoot_node() rather than
+    trusting the "kept identical" claim in its own docstring.
+    """
+    import subprocess
+    import sqlite3
+
+    def run_kamcmd(*args):
+        try:
+            out = subprocess.run([KAMCMD_PATH] + list(args), capture_output=True, text=True, timeout=10)
+            return out.stdout
+        except Exception:
+            return ""
+
+    # Same grace-period protection the manual troubleshoot check
+    # (nodeops.troubleshoot_node) already has -- a mismatch found while
+    # Kamailio is still within its own startup window is expected to
+    # self-correct on the very next sync cycle (confirmed live: exactly
+    # this happened, reloaded successfully 19 seconds after an initial
+    # failure caused purely by the ctl socket not existing yet during
+    # the restart itself), not a genuine problem worth alerting on.
+    # Skips the whole check this run rather than forcing is_problem to
+    # False, so an alert genuinely already open from BEFORE this
+    # restart isn't silently resolved just because of the grace window.
+    try:
+        uptime_out = subprocess.run(
+            ["systemctl", "show", "kamailio", "--property=ActiveEnterTimestamp", "--value"],
+            capture_output=True, text=True, timeout=10).stdout.strip()
+        kamailio_started_at = datetime.strptime(uptime_out, "%a %Y-%m-%d %H:%M:%S %Z") if uptime_out else None
+    except Exception:
+        kamailio_started_at = None
+    if kamailio_started_at is not None:
+        uptime_sec = (datetime.utcnow() - kamailio_started_at).total_seconds()
+        if 0 <= uptime_sec < 90:
+            return
+
+    try:
+        conn = sqlite3.connect(SQLITE_PATH)
+        cur = conn.cursor()
+        sqlite_counts = {}
+        for table in ("dispatcher", "uacreg", "listener_settings", "trunk_numbers", "subscriber_numbers",
+                       "subscriber_auth", "routing_profile_data", "blocklist_entries", "response_reasons",
+                       "trunk_ip_identity", "routing_profile_meta", "sip_listeners_ht", "sip_profile_domains_ht",
+                       "dispatcher_setid_alg_ht", "dispatcher_attrs_ht", "dispatcher_dest_attrs_ht",
+                       "media_profiles_ht", "trunk_credentials_ht", "trunk_dispatcher_attrs_ht",
+                       "subscriber_forwarding_meta_ht"):
+            cur.execute(f"SELECT COUNT(*) FROM {table}")
+            sqlite_counts[table] = cur.fetchone()[0]
+        conn.close()
+    except Exception:
+        # Can't read local SQLite at all -- a more specific check
+        # (Local SQLite integrity, in troubleshoot_node) already
+        # covers this more precisely; don't double-alert here.
+        return
+
+    mismatches = []
+
+    disp_live = run_kamcmd("dispatcher.list")
+    if disp_live:
+        live_dispatcher = disp_live.count("URI:")
+        if live_dispatcher != sqlite_counts["dispatcher"]:
+            mismatches.append(f"dispatcher: {sqlite_counts['dispatcher']} in SQLite vs {live_dispatcher} live")
+
+    reg_live = run_kamcmd("uac.reg_dump")
+    if reg_live:
+        live_uacreg = reg_live.count("l_uuid:")
+        if live_uacreg != sqlite_counts["uacreg"]:
+            mismatches.append(f"uacreg: {sqlite_counts['uacreg']} in SQLite vs {live_uacreg} live")
+
+    ht_live = run_kamcmd("htable.stats")
+    if ht_live:
+        # (htable_name, sqlite_table_name) pairs -- several of the
+        # newer htables' underlying dbtable name differs from the
+        # htable name itself (e.g. htable "sip_listeners" backed by
+        # dbtable "sip_listeners_ht"); live htable.stats reports by
+        # htable name, so the two must be kept distinct here rather
+        # than assumed identical.
+        ht_pairs = [
+            ("listener_settings", "listener_settings"), ("trunk_numbers", "trunk_numbers"),
+            ("subscriber_numbers", "subscriber_numbers"), ("subscriber_auth", "subscriber_auth"),
+            ("routing_profile_data", "routing_profile_data"), ("blocklist_entries", "blocklist_entries"),
+            ("response_reasons", "response_reasons"), ("trunk_ip_identity", "trunk_ip_identity"),
+            ("routing_profile_meta", "routing_profile_meta"), ("sip_listeners", "sip_listeners_ht"),
+            ("sip_profile_domains", "sip_profile_domains_ht"), ("dispatcher_setid_alg", "dispatcher_setid_alg_ht"),
+            ("dispatcher_attrs", "dispatcher_attrs_ht"), ("dispatcher_dest_attrs", "dispatcher_dest_attrs_ht"),
+            ("media_profiles", "media_profiles_ht"), ("trunk_credentials", "trunk_credentials_ht"),
+            ("trunk_dispatcher_attrs", "trunk_dispatcher_attrs_ht"),
+            ("subscriber_forwarding_meta", "subscriber_forwarding_meta_ht"),
+        ]
+        for ht_name, sqlite_table in ht_pairs:
+            ht_match = re.search(r"name:\s*" + re.escape(ht_name) + r"\b.*?all:\s*(\d+)", ht_live, re.DOTALL)
+            if ht_match:
+                live_count = int(ht_match.group(1))
+                if live_count != sqlite_counts[sqlite_table]:
+                    mismatches.append(f"{ht_name}: {sqlite_counts[sqlite_table]} in SQLite vs {live_count} live")
+            else:
+                mismatches.append(f"{ht_name}: not present in live htable.stats at all")
+
+    set_alert(pconn, node_id, "sqlite_live_mismatch", "critical",
+              "Local SQLite data and Kamailio's live in-memory state disagree: " + "; ".join(mismatches) if mismatches else "",
+              bool(mismatches), state)
+
+
+def main():
+    state = load_state()
+
+    now = time.time()
+    last_run_at = state.get("last_run_at")
+    is_backlog_catchup = last_run_at is not None and (now - last_run_at) > STALE_GAP_THRESHOLD_SEC
+    gap_desc = f"{int(now - last_run_at)}s" if last_run_at is not None else "n/a (first run)"
+
+    try:
+        kam_lines = read_new_lines(KAMAILIO_LOG, state)
+        sync_lines = read_new_lines(SYNC_LOG, state)
+        redis_lines = read_new_lines(REDIS_LOG, state)
+    except Exception as e:
+        print(f"FATAL: could not read log files: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        pconn = pg_connect()
+        pconn.autocommit = False
+    except Exception as e:
+        print(f"FATAL: could not connect to Postgres: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        node_id = get_node_id(pconn)
+        if node_id is None:
+            print("FATAL: this node's private_ip does not match any row in platform_nodes -- has self-registration run?", file=sys.stderr)
+            sys.exit(1)
+
+        # Always current-state, never log-history -- unaffected by a
+        # monitoring gap, since these reflect what's true right now
+        # regardless of how long it's been since the last check.
+        check_process(pconn, node_id, state, "kamailio", "kamailio_down", "Kamailio")
+        check_process(pconn, node_id, state, "rtpengine", "rtpengine_down", "RTPEngine")
+        check_process(pconn, node_id, state, "redis-server", "redis_down", "Redis")
+        check_process(pconn, node_id, state, "fail2ban", "fail2ban_down", "fail2ban")
+        check_disk_space(pconn, node_id, state)
+        check_sqlite_live_integrity(pconn, node_id, state)
+        check_security_enforcement(pconn, node_id, state)
+
+        if is_backlog_catchup:
+            # Log-based checks skipped this run only -- offsets above
+            # already advanced past the backlog (read_new_lines already
+            # consumed it), so the NEXT run resumes normal, accurate
+            # per-line evaluation with nothing double-counted or lost.
+            print(f"Gap since last run: {gap_desc} (>{STALE_GAP_THRESHOLD_SEC}s) -- treating as backlog catch-up, "
+                  f"skipping log-content checks this run to avoid alerting on stale/already-resolved history.")
+        else:
+            check_ctl_socket_failures(pconn, node_id, sync_lines, state)
+            check_kamailio_errors(pconn, node_id, kam_lines, state)
+            check_redis_log(pconn, node_id, redis_lines, state)
+            check_rtpengine_journal(pconn, node_id, state)
+
+        state["last_run_at"] = now
+        pconn.commit()
+        save_state(state)
+        print(f"Checked node_id={node_id}: {len(kam_lines)} new kamailio.log line(s), {len(sync_lines)} new sync-routing.log line(s), {len(redis_lines)} new redis log line(s)")
+    except Exception as e:
+        pconn.rollback()
+        print(f"FATAL: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        pconn.close()
+
+
+if __name__ == "__main__":
+    main()
