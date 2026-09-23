@@ -18,3 +18,6 @@ infrastructure/manager.conf
 __pycache__/
 *.pyc
 node/node.conf
+
+# Python virtualenv (dev env)
+manager/.venv/
