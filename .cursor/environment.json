@@ -5,7 +5,7 @@
   "terminals": [
     {
       "name": "manager-app",
-      "command": "cd manager/app && set -a && . ../../.cursor/manager.env && set +a && ../.venv/bin/python app.py"
+      "command": "./.cursor/start.sh && cd manager/app && set -a && . ../../.cursor/manager.env && set +a && ../.venv/bin/python app.py"
     }
   ]
 }
