@@ -51,6 +51,19 @@ MANAGER_SSH_PUBKEY="__SET_ME__"      # paste from the Manager's setup output
 # ── Optional features ───────────────────────────────────────
 ENABLE_FAIL2BAN="yes"              # yes | no
 ENABLE_SNMP="no"                   # yes | no -- if yes, set values below
+
+# RTP forwarding mode:
+#   no  (default) = userspace forwarding. No kernel module, no kernel
+#                   headers, no reboot required. Recommended -- especially
+#                   on cloud VMs (e.g. AWS EC2), where a kernel/headers
+#                   mismatch or a reboot into an unvalidated kernel can
+#                   strand the instance.
+#   yes           = in-kernel packet forwarding (higher throughput). Needs
+#                   kernel headers matching the RUNNING kernel and builds/
+#                   loads the rtpengine kernel module. If headers or the
+#                   module are unavailable it automatically degrades to
+#                   userspace forwarding (never fatal).
+RTPENGINE_INKERNEL="no"
 SKIP_SSH_HARDENING="no"            # yes to skip disabling password auth
                                     # (auto-skipped anyway if no SSH key is
                                     # present, to avoid any lockout risk)

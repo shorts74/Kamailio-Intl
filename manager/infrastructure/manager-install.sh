@@ -170,7 +170,17 @@ wait_for_apt_lock() {
 }
 
 step_system_prep() {
-  apt-get update && apt-get upgrade -y
+  apt-get update
+  # Debian 13 / cloud-image safety: do not let a routine upgrade swap the
+  # running kernel mid-install. On cloud VMs (e.g. AWS EC2) that creates a
+  # pending-reboot mismatch and rebooting into an unvalidated kernel can
+  # strand the instance. The Manager needs no kernel module/headers, so hold
+  # installed kernel/header packages across this upgrade; upgrade the kernel
+  # deliberately later (with a snapshot) if desired.
+  _held_kpkgs="$(dpkg-query -W -f='${Package}\n' 'linux-image-*' 'linux-headers-*' 2>/dev/null | grep -vE 'dbg' || true)"
+  [ -n "$_held_kpkgs" ] && apt-mark hold $_held_kpkgs >/dev/null 2>&1 || true
+  apt-get upgrade -y
+  [ -n "$_held_kpkgs" ] && apt-mark unhold $_held_kpkgs >/dev/null 2>&1 || true
   hostnamectl set-hostname "$MANAGER_NAME"
   echo "$MANAGER_NAME" > /etc/hostname
   grep -q "$MANAGER_IP" /etc/hosts || echo "$MANAGER_IP  $MANAGER_NAME $MANAGER_FQDN" >> /etc/hosts
@@ -349,7 +359,12 @@ host    kamailio        kamailio    127.0.0.1\/32    md5' /etc/postgresql/16/mai
 
 step_apply_schema() {
   curl -fsSL https://deb.kamailio.org/kamailiodebkey.gpg | gpg --dearmor -o /usr/share/keyrings/kamailio-archive-keyring.gpg
-  echo "deb [signed-by=/usr/share/keyrings/kamailio-archive-keyring.gpg] https://deb.kamailio.org/kamailio60 bookworm main" \
+  # Use the running distro's codename so the correct Kamailio suite is used
+  # (Debian 12 -> bookworm, Debian 13 -> trixie). The Manager only installs
+  # Kamailio to harvest its SQL schema files (it never runs Kamailio), but a
+  # wrong-release repo still breaks this apt install on Debian 13.
+  KAMAILIO_REPO_CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-bookworm}")"
+  echo "deb [signed-by=/usr/share/keyrings/kamailio-archive-keyring.gpg] https://deb.kamailio.org/kamailio60 ${KAMAILIO_REPO_CODENAME} main" \
     > /etc/apt/sources.list.d/kamailio.list
   wait_for_apt_lock
   apt-get update
